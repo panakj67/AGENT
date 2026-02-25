@@ -1,60 +1,56 @@
-// agent/agent.js
-import Groq from "groq-sdk";
-import { AVAILABLE_TOOLS } from "./tools/definitions.js";
-import { executeTool } from "./tools/executor.js";
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import { runAgent } from "./agent.js";
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const app = express();
+const PORT = Number(process.env.PORT) || 3000;
 
-export const runAgent = async (incomingMessages) => {
-  const MAX_STEPS = 8;
-  
-  // Ensure we have an array and a system prompt
-  let messages = Array.isArray(incomingMessages) ? incomingMessages : [];
-  
-  if (messages.length === 0 || messages[0].role !== "system") {
-    messages.unshift({
-      role: "system",
-      content: `You are Aura. 
-      RULES:
-      1. Respond ONLY with ONE JSON object at a time: {"tool": "name", "arguments": {...}}
-      2. Stop immediately after the JSON.
-      3. Do not assume tool results. Wait for the 'Observation'.
-      Available Tools: ${JSON.stringify(AVAILABLE_TOOLS)}`
-    });
+app.use(cors());
+app.use(express.json());
+
+function buildMessagesFromRequest(body) {
+  const payload = body ?? {};
+
+  if (Array.isArray(payload.messages)) {
+    return payload.messages;
   }
 
-  for (let step = 0; step < MAX_STEPS; step++) {
-    const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages,
-      temperature: 0,
-      stop: ["}"] // THIS STOPS THE MODEL FROM CHAINING TOOLS ILLEGALLY
-    });
+  if (typeof payload.prompt === "string" && payload.prompt.trim().length > 0) {
+    return [{ role: "user", content: payload.prompt.trim() }];
+  }
 
-    let content = response.choices[0].message.content.trim();
-    if (content.startsWith('{') && !content.endsWith('}')) content += "}";
+  if (typeof payload.message === "string" && payload.message.trim().length > 0) {
+    return [{ role: "user", content: payload.message.trim() }];
+  }
 
-    const match = content.match(/\{[\s\S]*?\}/);
-    if (!match) return content; // Final plain text answer
+  return null;
+}
 
-    try {
-      const toolCall = JSON.parse(match[0]);
-      console.log(`[Aura] Step ${step + 1}: Executing ${toolCall.tool}`);
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
 
-      // Execute the tool
-      const result = await executeTool({
-        function: {
-          name: toolCall.tool,
-          arguments: JSON.stringify(toolCall.arguments)
-        }
+app.post("/chat", async (req, res) => {
+  try {
+    const messages = buildMessagesFromRequest(req.body);
+
+    if (!messages) {
+      return res.status(400).json({
+        error: "Request body must include either 'messages' (array) or 'prompt' (string)",
       });
-
-      // Update history and CONTINUE the loop
-      messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
-      messages.push({ role: "user", content: `Observation: ${JSON.stringify(result)}` });
-
-    } catch (e) {
-      return `Error in execution: ${e.message}`;
     }
+
+    const reply = await runAgent(messages);
+    return res.json({ reply });
+  } catch (error) {
+    return res.status(500).json({
+      error: "Failed to process chat request",
+      details: error.message,
+    });
   }
-};
+});
+
+app.listen(PORT, () => {
+  console.log(`Aura server listening on port ${PORT}`);
+});
