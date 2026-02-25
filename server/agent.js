@@ -1,64 +1,66 @@
-// agent/agent.js
 import Groq from "groq-sdk";
-import { AVAILABLE_TOOLS } from "./tools/definitions.js";
+import { buildSystemPrompt } from "./prompts/systemPrompt.js";
+import { parseToolCall } from "./utils/parseToolCall.js";
 import { executeTool } from "./tools/executor.js";
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY
-});
+const MAX_STEPS = 6;
+let groqClient;
 
-export const runAgent = async (messages) => {
-  const MAX_STEPS = 5;
+function getGroqClient() {
+  if (groqClient) return groqClient;
 
-  // Ensure the system prompt is the VERY FIRST message and is hyper-strict
-  if (messages[0].role !== "system") {
-    messages.unshift({
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error("GROQ_API_KEY is not configured");
+  }
+
+  groqClient = new Groq({
+    apiKey: process.env.GROQ_API_KEY,
+  });
+
+  return groqClient;
+}
+
+function ensureSystemMessage(messages) {
+  const safeMessages = Array.isArray(messages) ? [...messages] : [];
+
+  if (safeMessages.length === 0 || safeMessages[0].role !== "system") {
+    safeMessages.unshift({
       role: "system",
-      content: `You are Aura. 
-      STRICT RULE: To use a tool, you MUST respond with a valid JSON object ONLY.
-      JSON Format: {"tool": "tool_name", "arguments": {"param": "value"}}
-      DO NOT use <function> tags. DO NOT use markdown.
-      Available Tools: ${JSON.stringify(AVAILABLE_TOOLS)}`
+      content: buildSystemPrompt(),
     });
   }
 
-  for (let step = 0; step < MAX_STEPS; step++) {
+  return safeMessages;
+}
+
+export async function runAgent(incomingMessages = []) {
+  const groq = getGroqClient();
+  const messages = ensureSystemMessage(incomingMessages);
+
+  for (let step = 0; step < MAX_STEPS; step += 1) {
     const response = await groq.chat.completions.create({
-      // Switching to 8b specifically to bypass the 70b native-format bug
-      model: "llama-3.1-8b-instant", 
+      model: "llama-3.3-70b-versatile",
       messages,
       temperature: 0,
-      // WE DO NOT PASS 'tools' HERE. This is the only way to stop the 400 error.
     });
 
-    const content = response.choices[0].message.content.trim();
-    
-    // Regex to find the JSON object
-    const match = content.match(/\{[\s\S]*?\}/);
+    const content = response.choices?.[0]?.message?.content?.trim() ?? "";
+    const toolCall = parseToolCall(content);
 
-    if (!match) {
-      // If no JSON is found, the agent is giving you the final answer
+    if (!toolCall) {
       return content;
     }
 
-    try {
-      const toolCall = JSON.parse(match[0]);
-      console.log(`[Aura] Step ${step + 1}: Executing ${toolCall.tool}`);
+    const result = await executeTool({
+      function: {
+        name: toolCall.tool,
+        arguments: JSON.stringify(toolCall.arguments),
+      },
+    });
 
-      const result = await executeTool({
-        function: {
-          name: toolCall.tool,
-          arguments: JSON.stringify(toolCall.arguments)
-        }
-      });
-
-      // Update the conversation history
-      messages.push({ role: "assistant", content: content });
-      messages.push({ role: "user", content: `Observation: ${JSON.stringify(result)}` });
-
-    } catch (e) {
-      console.error("Manual Parse Error:", e);
-      return content;
-    }
+    messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
+    messages.push({ role: "user", content: `Observation: ${JSON.stringify(result)}` });
   }
-};
+
+  return "I could not complete this request within the step limit.";
+}
