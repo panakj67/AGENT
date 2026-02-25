@@ -54,7 +54,7 @@ export async function runAgent(incomingMessages = []) {
     const result = await executeTool({
       function: {
         name: toolCall.tool,
-        arguments: JSON.stringify(toolCall.arguments ?? {}),
+        arguments: JSON.stringify(toolCall.arguments),
       },
     });
 
