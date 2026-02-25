@@ -1,7 +1,8 @@
 import Groq from "groq-sdk";
 import { buildSystemPrompt } from "./prompts/systemPrompt.js";
-import { parseToolCall } from "./utils/parseToolCall.js";
 import { executeTool } from "./tools/executor.js";
+import { formatFinalResponse } from "./utils/formatFinalResponse.js";
+import { parseToolCall } from "./utils/parseToolCall.js";
 
 const MAX_STEPS = 6;
 let groqClient;
@@ -48,7 +49,7 @@ export async function runAgent(incomingMessages = []) {
     const toolCall = parseToolCall(content);
 
     if (!toolCall) {
-      return content;
+      return formatFinalResponse(content);
     }
 
     const result = await executeTool({
@@ -62,5 +63,5 @@ export async function runAgent(incomingMessages = []) {
     messages.push({ role: "user", content: `Observation: ${JSON.stringify(result)}` });
   }
 
-  return "I could not complete this request within the step limit.";
+  return formatFinalResponse("I could not complete this request within the step limit.");
 }
