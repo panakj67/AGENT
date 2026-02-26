@@ -10,15 +10,19 @@
     <main class="app">
       <aside class="sidebar">
         <h2>Conversations</h2>
-        <button id="refreshConversations">Refresh</button>
+        <div class="sidebar-actions">
+          <button id="newConversation">New chat</button>
+          <button id="refreshConversations">Refresh</button>
+        </div>
         <ul id="conversationList"></ul>
       </aside>
       <section class="chat">
         <h1>Aura Assistant</h1>
+        <p id="status" class="status" aria-live="polite"></p>
         <div id="messages" class="messages"></div>
         <form id="chatForm">
           <textarea id="prompt" rows="3" placeholder="Type your prompt..."></textarea>
-          <button type="submit">Send</button>
+          <button id="sendButton" type="submit">Send</button>
         </form>
       </section>
     </main>
