@@ -1,56 +1,37 @@
 import "dotenv/config";
-import express from "express";
 import cors from "cors";
-import { runAgent } from "./agent.js";
+import express from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { connectDatabase } from "./config/database.js";
+import chatRoutes from "./routes/chat.routes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 app.use(cors());
 app.use(express.json());
-
-function buildMessagesFromRequest(body) {
-  const payload = body ?? {};
-
-  if (Array.isArray(payload.messages)) {
-    return payload.messages;
-  }
-
-  if (typeof payload.prompt === "string" && payload.prompt.trim().length > 0) {
-    return [{ role: "user", content: payload.prompt.trim() }];
-  }
-
-  if (typeof payload.message === "string" && payload.message.trim().length > 0) {
-    return [{ role: "user", content: payload.message.trim() }];
-  }
-
-  return null;
-}
+app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/chat", async (req, res) => {
-  try {
-    const messages = buildMessagesFromRequest(req.body);
+app.use("/api", chatRoutes);
+app.use("/", chatRoutes);
 
-    if (!messages) {
-      return res.status(400).json({
-        error: "Request body must include either 'messages' (array) or 'prompt' (string)",
-      });
-    }
+app.use((_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
-    const reply = await runAgent(messages);
-    return res.json({ reply });
-  } catch (error) {
-    return res.status(500).json({
-      error: "Failed to process chat request",
-      details: error.message,
+connectDatabase()
+  .catch((error) => {
+    console.error("[db] Connection failed:", error.message);
+  })
+  .finally(() => {
+    app.listen(PORT, () => {
+      console.log(`Aura server listening on port ${PORT}`);
     });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`Aura server listening on port ${PORT}`);
-});
+  });
