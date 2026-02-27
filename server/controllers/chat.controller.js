@@ -43,19 +43,23 @@ function toPublicConversation(doc) {
   };
 }
 
-function getInMemoryConversation(id) {
+function getInMemoryConversation(userId, id) {
   if (!id) return null;
-  return inMemoryConversations.get(id) ?? null;
+  const conversation = inMemoryConversations.get(id) ?? null;
+  if (!conversation || conversation.userId !== userId) {
+    return null;
+  }
+  return conversation;
 }
 
-async function getConversationById(id) {
+async function getConversationById(userId, id) {
   if (!id) return null;
 
   if (Conversation.db?.readyState === 1) {
-    return Conversation.findById(id);
+    return Conversation.findOne({ _id: id, userId });
   }
 
-  return getInMemoryConversation(id);
+  return getInMemoryConversation(userId, id);
 }
 
 function getConversationMessages(conversation) {
@@ -65,15 +69,20 @@ function getConversationMessages(conversation) {
 
   return conversation.messages
     .filter((message) => message && typeof message.role === "string" && typeof message.content === "string")
-    .map((message) => ({ role: message.role, content: message.content }));
+    .map((message) => ({
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+    }));
 }
 
-async function saveConversation(conversationId, userMessage, assistantMessage) {
+async function saveConversation(userId, conversationId, userMessage, assistantMessage) {
   if (Conversation.db?.readyState === 1) {
-    const current = conversationId ? await Conversation.findById(conversationId) : null;
+    const current = conversationId ? await Conversation.findOne({ _id: conversationId, userId }) : null;
 
     if (!current) {
       const created = await Conversation.create({
+        userId,
         title: normalizeTitle([userMessage]),
         messages: [userMessage, assistantMessage],
       });
@@ -94,6 +103,7 @@ async function saveConversation(conversationId, userMessage, assistantMessage) {
 
   const existing = inMemoryConversations.get(id) ?? {
     id,
+    userId,
     title: normalizeTitle([userMessage]),
     messages: [],
     createdAt: new Date(),
@@ -115,6 +125,11 @@ function fallbackReplyForMissingProvider() {
 
 export async function chat(req, res) {
   try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
     const normalized = normalizeMessages(req.body);
 
     if (!normalized) {
@@ -129,10 +144,15 @@ export async function chat(req, res) {
       return res.status(400).json({ error: "Last message must be a user message" });
     }
 
-    const existingConversation = await getConversationById(normalized.conversationId);
+    const existingConversation = await getConversationById(userId, normalized.conversationId);
     const historyMessages = getConversationMessages(existingConversation);
 
-    const latestUserMessage = { role: "user", content: String(userMessage.content) };
+    const messageTime = new Date();
+    const latestUserMessage = {
+      role: "user",
+      content: String(userMessage.content),
+      createdAt: messageTime,
+    };
     const agentMessages = historyMessages.length > 0
       ? [...historyMessages, latestUserMessage]
       : incomingMessages;
@@ -148,8 +168,12 @@ export async function chat(req, res) {
       }
     }
 
-    const assistantMessage = { role: "assistant", content: reply };
-    const conversation = await saveConversation(normalized.conversationId, latestUserMessage, assistantMessage);
+    const assistantMessage = {
+      role: "assistant",
+      content: reply,
+      createdAt: new Date(),
+    };
+    const conversation = await saveConversation(userId, normalized.conversationId, latestUserMessage, assistantMessage);
 
     return res.json({
       reply,
@@ -164,14 +188,22 @@ export async function chat(req, res) {
   }
 }
 
-export async function listConversations(_req, res) {
+export async function listConversations(req, res) {
   try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
     if (Conversation.db?.readyState === 1) {
-      const conversations = await Conversation.find().sort({ updatedAt: -1 }).limit(50);
+      const conversations = await Conversation.find({ userId }).sort({ updatedAt: -1 }).limit(50);
       return res.json(conversations.map(toPublicConversation));
     }
 
-    const conversations = [...inMemoryConversations.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+    const conversations = [...inMemoryConversations.values()]
+      .filter((conversation) => conversation.userId === userId)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    
     return res.json(conversations);
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch conversations", details: error.message });
@@ -180,17 +212,22 @@ export async function listConversations(_req, res) {
 
 export async function getConversation(req, res) {
   try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
     const { id } = req.params;
 
     if (Conversation.db?.readyState === 1) {
-      const conversation = await Conversation.findById(id);
+      const conversation = await Conversation.findOne({ _id: id, userId });
       if (!conversation) {
         return res.status(404).json({ error: "Conversation not found" });
       }
       return res.json(toPublicConversation(conversation));
     }
 
-    const conversation = inMemoryConversations.get(id);
+    const conversation = getInMemoryConversation(userId, id);
     if (!conversation) {
       return res.status(404).json({ error: "Conversation not found" });
     }
@@ -198,5 +235,34 @@ export async function getConversation(req, res) {
     return res.json(conversation);
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch conversation", details: error.message });
+  }
+}
+
+export async function deleteConversation(req, res) {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { id } = req.params;
+
+    if (Conversation.db?.readyState === 1) {
+      const deleted = await Conversation.findOneAndDelete({ _id: id, userId });
+      if (!deleted) {
+        return res.status(404).json({ error: "Conversation not found" });
+      }
+      return res.json({ success: true, id });
+    }
+
+    const conversation = getInMemoryConversation(userId, id);
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    inMemoryConversations.delete(id);
+    return res.json({ success: true, id });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to delete conversation", details: error.message });
   }
 }

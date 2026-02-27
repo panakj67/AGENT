@@ -1,138 +1,118 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
+import Home from "@/pages/Home";
+import Login from "@/pages/Login";
+import Signup from "@/pages/Signup";
+import ForgotPassword from "@/pages/ForgotPassword";
+import { clearAuthToken, getApiBaseUrl, getAuthToken } from "@/lib/auth";
 
-const apiBase = import.meta.env.VITE_API_BASE_URL || "";
-
-function endpoint(path) {
-  return `${apiBase}${path}`;
-}
-
-async function fetchJson(path, options) {
-  const response = await fetch(endpoint(path), options);
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
-
-  if (!response.ok) {
-    throw new Error(data?.error || "Request failed");
+function PublicOnlyRoute({ isAuthenticated, children }) {
+  if (isAuthenticated) {
+    return <Navigate to="/" replace />;
   }
-
-  return data;
+  return children;
 }
 
-function Message({ role, content }) {
-  return <div className={`message ${role}`}>{content}</div>;
+function ProtectedRoute({ isAuthenticated, children }) {
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+  return children;
 }
+
+const API_BASE_URL = getApiBaseUrl();
 
 export default function App() {
-  const [prompt, setPrompt] = useState("");
-  const [messages, setMessages] = useState([]);
-  const [conversations, setConversations] = useState([]);
-  const [conversationId, setConversationId] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState("");
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
 
-  const title = useMemo(() => "Aura Client", []);
-
-  async function loadConversations() {
-    try {
-      const data = await fetchJson("/api/conversations");
-      setConversations(data);
-    } catch (error) {
-      setStatus(error.message);
+  const refreshSession = useCallback(async () => {
+    const token = getAuthToken();
+    if (!token) {
+      setIsAuthenticated(false);
+      setCurrentUser(null);
+      setIsCheckingAuth(false);
+      return;
     }
-  }
-
-  async function loadConversation(id) {
-    try {
-      const data = await fetchJson(`/api/conversations/${id}`);
-      setConversationId(data.id);
-      setMessages(data.messages || []);
-      setStatus(`Loaded conversation: ${data.title}`);
-    } catch (error) {
-      setStatus(error.message);
-    }
-  }
-
-  async function sendPrompt(event) {
-    event.preventDefault();
-    const trimmed = prompt.trim();
-    if (!trimmed || loading) return;
-
-    const nextUser = { role: "user", content: trimmed };
-    setMessages((prev) => [...prev, nextUser]);
-    setPrompt("");
-    setLoading(true);
-    setStatus("");
 
     try {
-      const data = await fetchJson("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: trimmed, conversationId }),
+      const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       });
 
-      setConversationId(data.conversationId);
-      setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
-      await loadConversations();
-    } catch (error) {
-      setMessages((prev) => [...prev, { role: "assistant", content: error.message }]);
-      setStatus(error.message);
+      if (!response.ok) {
+        throw new Error("Session expired");
+      }
+
+      const data = await response.json();
+      setIsAuthenticated(true);
+      setCurrentUser(data.user || null);
+    } catch {
+      clearAuthToken();
+      setIsAuthenticated(false);
+      setCurrentUser(null);
     } finally {
-      setLoading(false);
+      setIsCheckingAuth(false);
     }
-  }
-
-  function startNewChat() {
-    setConversationId(null);
-    setMessages([]);
-    setStatus("Started a new chat");
-  }
-
-  useEffect(() => {
-    loadConversations();
   }, []);
 
-  return (
-    <main className="app">
-      <aside className="sidebar">
-        <h2>Conversations</h2>
-        <div className="actions">
-          <button onClick={startNewChat}>New chat</button>
-          <button onClick={loadConversations}>Refresh</button>
-        </div>
-        <ul>
-          {conversations.map((item) => (
-            <li
-              key={item.id}
-              onClick={() => loadConversation(item.id)}
-              className={item.id === conversationId ? "active" : ""}
-            >
-              {item.title}
-            </li>
-          ))}
-        </ul>
-      </aside>
+  useEffect(() => {
+    refreshSession();
+  }, [refreshSession]);
 
-      <section className="chat">
-        <h1>{title}</h1>
-        <p className="status">{status}</p>
-        <div className="messages">
-          {messages.map((message, index) => (
-            <Message key={`${message.role}-${index}`} role={message.role} content={message.content} />
-          ))}
-        </div>
-        <form onSubmit={sendPrompt}>
-          <textarea
-            rows={3}
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            placeholder="Type your prompt..."
-            disabled={loading}
-          />
-          <button type="submit" disabled={loading}>
-            {loading ? "Sending..." : "Send"}
-          </button>
-        </form>
-      </section>
-    </main>
+  const handleAuthSuccess = useCallback((user) => {
+    setIsAuthenticated(true);
+    setCurrentUser(user || null);
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    clearAuthToken();
+    setIsAuthenticated(false);
+    setCurrentUser(null);
+  }, []);
+
+  if (isCheckingAuth) {
+    return <div className="min-h-screen bg-gray-50" />;
+  }
+
+  return (
+    <Routes>
+      <Route
+        path="/"
+        element={(
+          <ProtectedRoute isAuthenticated={isAuthenticated}>
+            <Home user={currentUser} onLogout={handleLogout} />
+          </ProtectedRoute>
+        )}
+      />
+      <Route
+        path="/login"
+        element={(
+          <PublicOnlyRoute isAuthenticated={isAuthenticated}>
+            <Login onAuthSuccess={handleAuthSuccess} />
+          </PublicOnlyRoute>
+        )}
+      />
+      <Route
+        path="/signup"
+        element={(
+          <PublicOnlyRoute isAuthenticated={isAuthenticated}>
+            <Signup onAuthSuccess={handleAuthSuccess} />
+          </PublicOnlyRoute>
+        )}
+      />
+      <Route
+        path="/forgot-password"
+        element={(
+          <PublicOnlyRoute isAuthenticated={isAuthenticated}>
+            <ForgotPassword />
+          </PublicOnlyRoute>
+        )}
+      />
+      <Route path="*" element={<Navigate to={isAuthenticated ? "/" : "/login"} replace />} />
+    </Routes>
   );
 }

@@ -1,10 +1,12 @@
 import Groq from "groq-sdk";
 import { buildSystemPrompt } from "./prompts/systemPrompt.js";
+import { AVAILABLE_TOOLS } from "./tools/definitions.js";
 import { executeTool } from "./tools/executor.js";
 import { formatFinalResponse } from "./utils/formatFinalResponse.js";
 import { parseToolCall } from "./utils/parseToolCall.js";
 
 const MAX_STEPS = 6;
+const KNOWN_TOOL_NAMES = new Set(AVAILABLE_TOOLS.map((tool) => tool.function.name));
 let groqClient;
 
 function getGroqClient() {
@@ -22,7 +24,14 @@ function getGroqClient() {
 }
 
 function ensureSystemMessage(messages) {
-  const safeMessages = Array.isArray(messages) ? [...messages] : [];
+  const safeMessages = Array.isArray(messages)
+    ? messages
+      .filter((message) => message && typeof message.role === "string")
+      .map((message) => ({
+        role: message.role,
+        content: typeof message.content === "string" ? message.content : String(message.content ?? ""),
+      }))
+    : [];
 
   if (safeMessages.length === 0 || safeMessages[0].role !== "system") {
     safeMessages.unshift({
@@ -49,6 +58,21 @@ export async function runAgent(incomingMessages = []) {
     const toolCall = parseToolCall(content);
 
     if (!toolCall) {
+      // Recover when the model tries to call a non-existent tool (e.g. install_dependency).
+      try {
+        const parsed = JSON.parse(content);
+        const requestedTool = typeof parsed?.tool === "string" ? parsed.tool.trim() : "";
+        if (requestedTool && !KNOWN_TOOL_NAMES.has(requestedTool)) {
+          messages.push({ role: "assistant", content });
+          messages.push({
+            role: "user",
+            content: `Observation: Unknown tool "${requestedTool}". Use only these tools: ${[...KNOWN_TOOL_NAMES].join(", ")}.`,
+          });
+          continue;
+        }
+      } catch {
+        // Not a direct JSON tool call, proceed as normal response.
+      }
       return formatFinalResponse(content);
     }
 

@@ -13,11 +13,19 @@ const MessageSchema = new mongoose.Schema(
       trim: true,
     },
   },
-  { _id: false }
+  {
+    _id: false,
+    timestamps: true,
+  }
 );
 
 const ConversationSchema = new mongoose.Schema(
   {
+    userId: {
+      type: String,
+      required: true,
+      index: true,
+    },
     title: {
       type: String,
       default: "New conversation",

@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { connectDatabase } from "./config/database.js";
 import chatRoutes from "./routes/chat.routes.js";
+import authRoutes from "./routes/auth.routes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -19,6 +20,7 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+app.use("/api/auth", authRoutes);
 app.use("/api", chatRoutes);
 app.use("/", chatRoutes);
 
