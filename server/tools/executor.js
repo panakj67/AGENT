@@ -2,6 +2,15 @@ import axios from "axios";
 import nodemailer from "nodemailer";
 import "dotenv/config";
 
+import { 
+  scrapeWebsite, 
+  clickAndScrape, 
+  fillAndSubmitForm, 
+  takeScreenshot 
+} from "./browser.js"
+
+import { Task } from "../models/task.model.js"
+
 function parseArguments(rawArgs) {
   if (!rawArgs) return {};
   if (typeof rawArgs === "object") return rawArgs;
@@ -217,35 +226,151 @@ async function readGmailInbox({
   };
 }
 
+// tools/executor.js — add handler:
+async function readEmailBody({ uid, folder = "INBOX" }) {
+  const client = new ImapFlow({
+    host: process.env.IMAP_HOST || "imap.gmail.com",
+    port: 993,
+    secure: true,
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
+    }
+  })
+
+  await client.connect()
+  await client.mailboxOpen(folder)
+
+  let body = ""
+  for await (const msg of client.fetch([uid], { bodyParts: ["TEXT"] })) {
+    body = msg.bodyParts?.get("TEXT")?.toString() || ""
+  }
+
+  await client.logout()
+  return { uid, body: body.slice(0, 2000) } // limit size
+}
+
+async function getNews({ topic, count = 5 }) {
+  const response = await axios.get(
+    "https://newsapi.org/v2/everything",
+    {
+      params: {
+        q: topic,
+        pageSize: count,
+        language: "en",        // English only
+        sortBy: "publishedAt", // Latest first
+        apiKey: process.env.NEWS_API_KEY
+      }
+    }
+  )
+
+  const articles = response.data?.articles || []
+  return articles.map(a => ({
+    title: a.title,
+    source: a.source?.name,
+    publishedAt: a.publishedAt,
+    url: a.url
+  }))
+}
+
+async function getCryptoPrice({ coin, currency = "usd" }) {
+  const response = await axios.get(
+    `https://api.coingecko.com/api/v3/simple/price`,
+    { params: { ids: coin, vs_currencies: currency } }
+  )
+  const price = response.data?.[coin]?.[currency]
+  if (!price) return { error: `Could not find price for ${coin}` }
+  return { coin, currency, price }
+}
+
+async function saveTask({ title, description, due_at, recurring = "none", recurring_time = null }, userId, userEmail) {
+  const task = await Task.create({
+    userId,
+    userEmail,
+    title,
+    description: description || "",
+    dueAt: due_at ? new Date(due_at) : null,
+    recurring,
+    recurringTime: recurring_time
+  })
+
+  return { 
+    success: true, 
+    task_id: task._id,
+    message: `Task saved: "${title}"${due_at ? ` — reminder at ${new Date(due_at).toLocaleString()}` : ""}`
+  }
+}
+
+async function getTasks({ include_completed = false }, userId) {
+  const query = { userId }
+  if (!include_completed) query.completed = false
+
+  const tasks = await Task.find(query).sort({ dueAt: 1 })
+
+  if (tasks.length === 0) {
+    return { message: "No tasks found", tasks: [] }
+  }
+
+  return {
+    count: tasks.length,
+    tasks: tasks.map(t => ({
+      id: t._id,
+      title: t.title,
+      description: t.description,
+      dueAt: t.dueAt,
+      recurring: t.recurring,
+      completed: t.completed
+    }))
+  }
+}
+
+async function deleteTask({ task_id }, userId) {
+  const task = await Task.findOneAndDelete({ 
+    _id: task_id, 
+    userId 
+  })
+
+  if (!task) {
+    return { success: false, message: "Task not found" }
+  }
+
+  return { success: true, message: `Deleted: "${task.title}"` }
+}
+
 const TOOL_HANDLERS = {
   search_web: searchWeb,
   send_email: sendEmail,
   get_weather: getWeather,
   read_gmail: readGmailInbox,
+  read_email_body: readEmailBody,
+  scrape_website: scrapeWebsite,       
+  click_and_scrape: clickAndScrape,    
+  fill_form: fillAndSubmitForm,        
+  take_screenshot: takeScreenshot,
+  get_news: getNews,
+  get_crypto_price: getCryptoPrice,
+  save_task: (params, context) => saveTask(params, context?.userId, context?.userEmail),
+  get_tasks: (params, context) => getTasks(params, context?.userId),
+  delete_task: (params, context) => deleteTask(params, context?.userId),     
 };
 
-export async function executeTool(toolCall) {
-  const name = toolCall?.function?.name;
-  const params = parseArguments(toolCall?.function?.arguments);
 
-  const handler = TOOL_HANDLERS[name];
+
+export async function executeTool(toolCall, context = {}) {
+  const name = toolCall?.function?.name
+  const params = parseArguments(toolCall?.function?.arguments)
+
+  const handler = TOOL_HANDLERS[name]
   if (!handler) {
-    return { error: `Unknown tool: ${name}` };
+    return { error: `Unknown tool: ${name}` }
   }
 
   try {
-    return await handler(params);
+    return await handler(params, context)
   } catch (error) {
-    const status = error?.response?.status;
-    const apiMessage = error?.response?.data?.message;
-    const details = status
-      ? `${error.message}${apiMessage ? ` - ${apiMessage}` : ""}`
-      : error.message;
-
     return {
       error: `Tool execution failed for ${name}`,
-      details,
-      status,
-    };
+      details: error.message
+    }
   }
 }

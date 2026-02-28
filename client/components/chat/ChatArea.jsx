@@ -25,12 +25,18 @@ const themeAvatarClasses = {
     },
 };
 
-export default function ChatArea({ messages, user, isLoading }) {
+export default function ChatArea({ messages, user, isLoading, streamingMessageId }) {
     const { theme } = useTheme();
     const messagesEndRef = useRef(null);
+    const visibleMessages = messages.filter((message) => {
+        if (!isLoading) return true;
+        if (!streamingMessageId) return true;
+        if (message.id !== streamingMessageId) return true;
+        return Boolean((message.content || '').trim());
+    });
 
     const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        messagesEndRef.current?.scrollIntoView({ behavior: isLoading ? 'auto' : 'smooth' });
     };
 
     useEffect(() => {
@@ -50,19 +56,26 @@ export default function ChatArea({ messages, user, isLoading }) {
               <p className="text-sm sm:text-base text-gray-600 px-4">Ask me anything to get started</p>
             </div>
           </div>) : (<>
-            {messages.map((message, index) => (<Message key={message.id} {...message} isLastMessage={index === messages.length - 1} user={user}/>))}
-            {isLoading && (<div className="flex gap-3 mb-4">
-                <div className={`w-8 h-8 rounded-full bg-gradient-to-br ${avatarClass.ai} flex-shrink-0 flex items-center justify-center text-white text-xs font-semibold`}>
-                  A
-                </div>
-                <div className="bg-gray-100 rounded-lg rounded-bl-none px-4 py-3">
-                  <div className="flex gap-1">
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
-                  </div>
-                </div>
-              </div>)}
+            {visibleMessages.map((message, index) => (
+                <Message
+                  key={message.id}
+                  {...message}
+                  isLastMessage={index === visibleMessages.length - 1}
+                  user={user}
+                  isStreaming={message.id === streamingMessageId}
+                />
+            ))}
+            {isLoading && streamingMessageId && !visibleMessages.some((message) => message.id === streamingMessageId) && (
+                <Message
+                  id={streamingMessageId}
+                  role="assistant"
+                  content=""
+                  createdAt={new Date().toISOString()}
+                  isLastMessage
+                  user={user}
+                  isStreaming
+                />
+            )}
             <div ref={messagesEndRef}/>
           </>)}
       </div>

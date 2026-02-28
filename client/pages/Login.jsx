@@ -46,7 +46,7 @@ export default function Login({ onAuthSuccess }) {
   return (
     <main className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        <div className="bg-white rounded-2xl shadow-lg p-8">
+        <div className="bg-white rounded-2xl shadow-lg p-4">
           <div className="mb-8">
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center">
@@ -56,13 +56,13 @@ export default function Login({ onAuthSuccess }) {
             </div>
           </div>
 
-          <div className="mb-8">
-            <h1 className="text-2xl font-bold text-gray-900 mb-2">Sign In</h1>
+          <div className="mb-4">
+            <h1 className="text-2xl font-bold text-gray-900 mb-">Sign In</h1>
             <p className="text-gray-600 text-sm">Welcome back! Please enter your details</p>
           </div>
 
-          <form className="space-y-6" onSubmit={handleSubmit}>
-            <div className="space-y-2">
+          <form className="space-y-2" onSubmit={handleSubmit}>
+            <div className="space-y-1">
               <Label htmlFor="email" className="text-sm font-medium text-gray-700">
                 Email
               </Label>
@@ -77,7 +77,7 @@ export default function Login({ onAuthSuccess }) {
               />
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-1">
               <Label htmlFor="password" className="text-sm font-medium text-gray-700">
                 Password
               </Label>
@@ -109,7 +109,7 @@ export default function Login({ onAuthSuccess }) {
 
             <Button
               type="submit"
-              className="w-full h-11 bg-blue-600 hover:bg-blue-700 text-white font-medium text-base rounded-lg transition-colors"
+              className="w-full h-11 mt-2 bg-blue-600 hover:bg-blue-700 text-white font-medium text-base rounded-lg transition-colors"
               disabled={isSubmitting}
             >
               {isSubmitting ? (
@@ -123,7 +123,7 @@ export default function Login({ onAuthSuccess }) {
             </Button>
           </form>
 
-          <p className="text-center text-sm text-gray-600 mt-6">
+          <p className="text-center text-sm text-gray-600 mt-4">
             Don&apos;t have an account?{" "}
             <Link to="/signup" className="text-blue-600 hover:text-blue-700 font-medium">
               Sign up

@@ -18,6 +18,40 @@ function normalizeToolCall(candidate) {
   return { tool, arguments: argumentsObject };
 }
 
+function normalizeOpenAIToolCall(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+
+  const fn = candidate.function;
+  const tool = typeof fn?.name === "string" ? fn.name.trim() : "";
+  if (!tool || !KNOWN_TOOL_NAMES.has(tool)) {
+    return null;
+  }
+
+  const args = fn?.arguments ?? fn?.parameters;
+  if (!args) {
+    return { tool, arguments: {} };
+  }
+
+  if (typeof args === "string") {
+    try {
+      const parsedArgs = JSON.parse(args);
+      const argumentsObject =
+        parsedArgs && typeof parsedArgs === "object" && !Array.isArray(parsedArgs)
+          ? parsedArgs
+          : {};
+      return { tool, arguments: argumentsObject };
+    } catch {
+      return { tool, arguments: {} };
+    }
+  }
+
+  const argumentsObject =
+    args && typeof args === "object" && !Array.isArray(args) ? args : {};
+  return { tool, arguments: argumentsObject };
+}
+
 function findBalancedJsonObjects(text) {
   const blocks = [];
   let start = -1;
@@ -89,6 +123,10 @@ export function parseToolCall(content) {
 
   try {
     const direct = JSON.parse(trimmed);
+    const normalizedOpenAI = normalizeOpenAIToolCall(direct);
+    if (normalizedOpenAI) {
+      return normalizedOpenAI;
+    }
     const normalizedDirect = normalizeToolCall(direct);
     if (normalizedDirect) {
       return normalizedDirect;

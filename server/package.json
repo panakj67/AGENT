@@ -19,10 +19,15 @@
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
     "groq-sdk": "^0.37.0",
     "imapflow": "^1.0.181",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^9.2.2",
-    "nodemailer": "^8.0.1"
+    "node-cron": "^4.2.1",
+    "nodemailer": "^8.0.1",
+    "puppeteer": "^24.37.5",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }

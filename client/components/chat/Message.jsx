@@ -1,5 +1,5 @@
 import { ThumbsUp, ThumbsDown, Copy, MoreVertical } from 'lucide-react';
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTheme } from '@/components/providers/ThemeProvider';
@@ -63,13 +63,14 @@ function formatMessageTimestamp(value) {
     return `${fullDate}, ${time}`;
 }
 
-export default function Message({
+const Message = memo(function Message({
     role,
     content,
     createdAt,
     avatar,
     isLastMessage,
-    user
+    user,
+    isStreaming = false,
 }) {
     const [copied, setCopied] = useState(false);
     const { theme } = useTheme();
@@ -108,9 +109,24 @@ export default function Message({
                         ? `${messageClass.userBubble} text-white rounded-br-none break-words prose-invert`
                         : 'bg-gray-100 text-gray-900 rounded-bl-none break-words'}`}
                 >
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {content}
-                    </ReactMarkdown>
+                    {isStreaming && !isUser ? (
+                        content ? (
+                            <div className="whitespace-pre-wrap">
+                                {content}
+                                <span className="inline-block w-2 ml-0.5 animate-pulse">|</span>
+                            </div>
+                        ) : (
+                            <div className="flex gap-1 py-1">
+                                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+                            </div>
+                        )
+                    ) : (
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {content}
+                        </ReactMarkdown>
+                    )}
                 </div>
 
                 {/* ⭐ ACTIONS */}
@@ -143,4 +159,13 @@ export default function Message({
             )}
         </div>
     );
-}
+}, (prev, next) => (
+    prev.role === next.role
+    && prev.content === next.content
+    && prev.createdAt === next.createdAt
+    && prev.isLastMessage === next.isLastMessage
+    && prev.user === next.user
+    && prev.isStreaming === next.isStreaming
+));
+
+export default Message;

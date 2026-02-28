@@ -1,7 +1,9 @@
-import { runAgent } from "../agent.js";
+import { runAgent, runAgentStream } from "../agent.js";
 import { Conversation } from "../models/conversation.model.js";
 
 const inMemoryConversations = new Map();
+const MAX_CONTEXT_TOKENS = 2000;
+const MAX_CONTEXT_MESSAGES = 3;
 
 function normalizeMessages(body) {
   const payload = body ?? {};
@@ -76,6 +78,28 @@ function getConversationMessages(conversation) {
     }));
 }
 
+function estimateTokensFromText(text) {
+  if (!text) return 0;
+  return Math.ceil(String(text).length / 4);
+}
+
+function trimMessagesByTokenBudget(messages, maxTokens) {
+  const trimmed = Array.isArray(messages) ? [...messages] : [];
+  while (trimmed.length > 0) {
+    const totalTokens = trimmed.reduce((sum, message) => sum + estimateTokensFromText(message.content), 0);
+    if (totalTokens <= maxTokens) break;
+    if (trimmed.length === 1) break;
+    trimmed.shift();
+  }
+  return trimmed;
+}
+
+function trimMessagesForContext(messages) {
+  const base = Array.isArray(messages) ? messages.filter(Boolean) : [];
+  const lastMessages = base.slice(-MAX_CONTEXT_MESSAGES);
+  return trimMessagesByTokenBudget(lastMessages, MAX_CONTEXT_TOKENS);
+}
+
 async function saveConversation(userId, conversationId, userMessage, assistantMessage) {
   if (Conversation.db?.readyState === 1) {
     const current = conversationId ? await Conversation.findOne({ _id: conversationId, userId }) : null;
@@ -123,6 +147,27 @@ function fallbackReplyForMissingProvider() {
   return "### Answer\n- AI provider is not configured on the server yet.\n- Please set `GROQ_API_KEY` to enable live assistant responses.";
 }
 
+function wantsStreamingResponse(req) {
+  if (req.query?.stream === "1") return true;
+  const accept = req.headers?.accept ?? "";
+  return typeof accept === "string" && accept.includes("text/event-stream");
+}
+
+function initializeSse(res) {
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") {
+    res.flushHeaders();
+  }
+}
+
+function writeSseEvent(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
 export async function chat(req, res) {
   try {
     const userId = req.user?.id;
@@ -153,13 +198,61 @@ export async function chat(req, res) {
       content: String(userMessage.content),
       createdAt: messageTime,
     };
-    const agentMessages = historyMessages.length > 0
-      ? [...historyMessages, latestUserMessage]
-      : incomingMessages;
+    const agentMessages = [latestUserMessage];
+
+    if (wantsStreamingResponse(req)) {
+      initializeSse(res);
+
+      let streamedReply = "";
+      try {
+        streamedReply = await runAgentStream(agentMessages, {
+          userId,
+          userEmail: req.user?.email,
+        }, async (token) => {
+          if (!token) return;
+          writeSseEvent(res, { type: "token", token });
+        });
+      } catch (error) {
+        if (error.message === "GROQ_API_KEY is not configured") {
+          streamedReply = fallbackReplyForMissingProvider();
+          writeSseEvent(res, { type: "token", token: streamedReply });
+        } else {
+          writeSseEvent(res, {
+            type: "error",
+            error: "Failed to process chat request",
+            details: error.message,
+          });
+          return res.end();
+        }
+      }
+
+      const assistantMessage = {
+        role: "assistant",
+        content: streamedReply,
+        createdAt: new Date(),
+      };
+      const conversation = await saveConversation(
+        userId,
+        normalized.conversationId,
+        latestUserMessage,
+        assistantMessage,
+      );
+
+      writeSseEvent(res, {
+        type: "done",
+        reply: streamedReply,
+        conversationId: conversation.id,
+        conversation,
+      });
+      return res.end();
+    }
 
     let reply;
     try {
-      reply = await runAgent(agentMessages);
+      reply = await runAgent(agentMessages, {
+        userId: userId,
+        userEmail: req.user?.email
+      })
     } catch (error) {
       if (error.message === "GROQ_API_KEY is not configured") {
         reply = fallbackReplyForMissingProvider();

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Menu, X } from 'lucide-react';
 import { authHeaders, clearAuthToken, getApiBaseUrl } from '@/lib/auth';
 import ChatSidebar from '@/components/chat/ChatSidebar';
@@ -25,12 +25,68 @@ function mapServerMessages(messages = []) {
     }));
 }
 
+async function consumeSseStream(response, handlers) {
+    const reader = response.body?.getReader();
+    if (!reader) {
+        throw new Error('Streaming response body is not available');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        let boundaryIndex = buffer.indexOf('\n\n');
+        while (boundaryIndex !== -1) {
+            const rawEvent = buffer.slice(0, boundaryIndex).trim();
+            buffer = buffer.slice(boundaryIndex + 2);
+            boundaryIndex = buffer.indexOf('\n\n');
+
+            if (!rawEvent) continue;
+
+            const dataLine = rawEvent
+                .split('\n')
+                .find((line) => line.startsWith('data: '));
+
+            if (!dataLine) continue;
+
+            let payload;
+            try {
+                payload = JSON.parse(dataLine.slice(6));
+            } catch {
+                continue;
+            }
+
+            if (payload?.type === 'token') {
+                handlers.onToken?.(payload.token || '');
+                continue;
+            }
+
+            if (payload?.type === 'done') {
+                handlers.onDone?.(payload);
+                continue;
+            }
+
+            if (payload?.type === 'error') {
+                handlers.onError?.(payload);
+            }
+        }
+    }
+}
+
 export default function Home({ user, onLogout }) {
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [messages, setMessages] = useState([]);
     const [conversationId, setConversationId] = useState(null);
     const [chatHistory, setChatHistory] = useState([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [streamingMessageId, setStreamingMessageId] = useState(null);
+    const streamTokenBufferRef = useRef('');
+    const streamRafRef = useRef(null);
 
     const loadConversations = useCallback(async () => {
         try {
@@ -59,19 +115,47 @@ export default function Home({ user, onLogout }) {
         loadConversations();
     }, [loadConversations]);
 
-    
-    
+    const flushBufferedTokens = useCallback((assistantMessageId) => {
+        if (!assistantMessageId) return;
+        if (!streamTokenBufferRef.current) return;
+
+        const chunk = streamTokenBufferRef.current;
+        streamTokenBufferRef.current = '';
+        setMessages((prev) =>
+            prev.map((item) =>
+                item.id === assistantMessageId
+                    ? { ...item, content: `${item.content || ''}${chunk}` }
+                    : item,
+            ),
+        );
+    }, []);
+
+    useEffect(() => () => {
+        if (streamRafRef.current) {
+            cancelAnimationFrame(streamRafRef.current);
+        }
+    }, []);
 
     const handleSendMessage = useCallback(async (message) => {
+        const assistantMessageId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-assistant`;
         const userMessage = createUiMessage('user', message);
-        setMessages((prev) => [...prev, userMessage]);
+        const assistantPlaceholder = {
+            id: assistantMessageId,
+            role: 'assistant',
+            content: '',
+            createdAt: new Date().toISOString(),
+        };
+
+        setMessages((prev) => [...prev, userMessage, assistantPlaceholder]);
         setIsLoading(true);
+        setStreamingMessageId(assistantMessageId);
+        streamTokenBufferRef.current = '';
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/chat`, {
+            const response = await fetch(`${API_BASE_URL}/api/chat?stream=1`, {
                 method: 'POST',
                 headers: {
-                    ...authHeaders(),
+                    ...authHeaders({ Accept: 'text/event-stream' }),
                 },
                 body: JSON.stringify({
                     conversationId,
@@ -79,36 +163,82 @@ export default function Home({ user, onLogout }) {
                 }),
             });
 
-            const data = await response.json();
             if (response.status === 401) {
                 clearAuthToken();
                 onLogout?.();
                 return;
             }
+
             if (!response.ok) {
+                const data = await response.json().catch(() => ({}));
                 throw new Error(data?.details || data?.error || 'Failed to send message');
             }
 
-            const nextConversationId = data?.conversationId || data?.conversation?.id || null;
+            let streamedText = '';
+            let donePayload = null;
+
+            await consumeSseStream(response, {
+                onToken: (token) => {
+                    streamedText += token;
+                    streamTokenBufferRef.current += token;
+                    if (!streamRafRef.current) {
+                        streamRafRef.current = requestAnimationFrame(() => {
+                            streamRafRef.current = null;
+                            flushBufferedTokens(assistantMessageId);
+                        });
+                    }
+                },
+                onDone: (payload) => {
+                    donePayload = payload;
+                },
+                onError: (payload) => {
+                    throw new Error(payload?.details || payload?.error || 'Stream failed');
+                },
+            });
+            flushBufferedTokens(assistantMessageId);
+
+            if (!donePayload) {
+                throw new Error('Chat stream ended unexpectedly');
+            }
+
+            const nextConversationId = donePayload?.conversationId || donePayload?.conversation?.id || null;
             if (nextConversationId) {
                 setConversationId(nextConversationId);
             }
 
-            if (Array.isArray(data?.conversation?.messages)) {
-                setMessages(mapServerMessages(data.conversation.messages));
+            if (Array.isArray(donePayload?.conversation?.messages)) {
+                setMessages(mapServerMessages(donePayload.conversation.messages));
             } else {
-                setMessages((prev) => [...prev, createUiMessage('assistant', data.reply || 'No response received.')]);
+                const finalReply = donePayload?.reply || streamedText || 'No response received.';
+                setMessages((prev) =>
+                    prev.map((item) =>
+                        item.id === assistantMessageId
+                            ? { ...item, content: finalReply }
+                            : item,
+                    ),
+                );
             }
+            setStreamingMessageId(null);
         } catch (error) {
-            setMessages((prev) => [
-                ...prev,
-                createUiMessage('assistant', `Unable to reach server: ${error.message}`),
-            ]);
+            flushBufferedTokens(assistantMessageId);
+            setMessages((prev) =>
+                prev.map((item) =>
+                    item.id === assistantMessageId
+                        ? { ...item, content: `Unable to reach server: ${error.message}` }
+                        : item,
+                ),
+            );
+            setStreamingMessageId(null);
         } finally {
+            if (streamRafRef.current) {
+                cancelAnimationFrame(streamRafRef.current);
+                streamRafRef.current = null;
+            }
+            streamTokenBufferRef.current = '';
             setIsLoading(false);
             loadConversations();
         }
-    }, [conversationId, loadConversations, onLogout]);
+    }, [conversationId, flushBufferedTokens, loadConversations, onLogout]);
 
     const handleNewChat = () => {
         setMessages([]);
@@ -215,7 +345,12 @@ export default function Home({ user, onLogout }) {
           </div>
         </div>
 
-        <ChatArea messages={messages} user={user?.name ? user.name.charAt(0).toUpperCase() : 'U'} isLoading={isLoading}/>
+        <ChatArea
+          messages={messages}
+          user={user?.name ? user.name.charAt(0).toUpperCase() : 'U'}
+          isLoading={isLoading}
+          streamingMessageId={streamingMessageId}
+        />
         <div className="sticky bottom-0 z-20">
           <ChatInput onSend={handleSendMessage} disabled={isLoading}/>
         </div>
