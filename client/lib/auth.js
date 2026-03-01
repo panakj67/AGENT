@@ -13,7 +13,15 @@ export function clearAuthToken() {
 }
 
 export function getApiBaseUrl() {
-  return (import.meta.env.VITE_API_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
+  const configured = String(import.meta.env.VITE_API_BASE_URL || "").trim();
+  if (configured) return configured.replace(/\/$/, "");
+
+  // Fallback to same-origin API when env is not set.
+  if (typeof window !== "undefined" && window.location?.origin) {
+    return window.location.origin.replace(/\/$/, "");
+  }
+
+  return "";
 }
 
 export function authHeaders(extra = {}) {
