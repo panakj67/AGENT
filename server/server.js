@@ -25,7 +25,9 @@ const __dirname = path.dirname(__filename);
 
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
-app.use(cors());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || "http://localhost:5173",
+}));
 app.use(express.json({ limit: "256kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
