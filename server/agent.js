@@ -7,6 +7,7 @@ import { parseToolCall } from "./utils/parseToolCall.js";
 
 const MAX_STEPS = 10;
 const KNOWN_TOOL_NAMES = new Set(AVAILABLE_TOOLS.map((tool) => tool.function.name));
+const DEFAULT_MODEL = "llama-3.3-70b-versatile";
 let groqClient;
 
 function containsToolPayloadHeuristic(content = "") {
@@ -37,6 +38,10 @@ function getGroqClient() {
   return groqClient;
 }
 
+function getModelName() {
+  return process.env.GROQ_MODEL || DEFAULT_MODEL;
+}
+
 function ensureSystemMessage(messages) {
   const safeMessages = Array.isArray(messages)
     ? messages
@@ -64,7 +69,7 @@ export async function runAgent(incomingMessages = [], context = {}) {
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
     const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: getModelName(),
       messages,
       temperature: 0,
     });
@@ -83,7 +88,6 @@ export async function runAgent(incomingMessages = [], context = {}) {
         continue;
       }
 
-      // Recover when the model tries to call a non-existent tool (e.g. install_dependency).
       try {
         const parsed = JSON.parse(content);
         const requestedTool = typeof parsed?.tool === "string" ? parsed.tool.trim() : "";
@@ -96,7 +100,7 @@ export async function runAgent(incomingMessages = [], context = {}) {
           continue;
         }
       } catch {
-        // Not a direct JSON tool call, proceed as normal response.
+        // Not a direct JSON tool call.
       }
 
       if (claimsEmailSent(content) && !sendEmailSucceeded) {
@@ -112,19 +116,19 @@ export async function runAgent(incomingMessages = [], context = {}) {
       return formatFinalResponse(content);
     }
 
-    const result = await executeTool({
+    const toolResult = await executeTool({
       function: {
         name: toolCall.tool,
         arguments: JSON.stringify(toolCall.arguments),
       },
-    }, context);   // ← pass context here
+    }, context);
 
     if (toolCall.tool === "send_email") {
-      sendEmailSucceeded = Boolean(result?.success);
+      sendEmailSucceeded = Boolean(toolResult?.success);
     }
 
     messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
-    messages.push({ role: "user", content: `Observation: ${JSON.stringify(result)}` });
+    messages.push({ role: "user", content: `Observation: ${JSON.stringify(toolResult)}` });
   }
 
   return formatFinalResponse("I could not complete this request within the step limit.");
@@ -132,22 +136,21 @@ export async function runAgent(incomingMessages = [], context = {}) {
 
 export async function runAgentStream(incomingMessages = [], context = {}, handlers = {}) {
   const onToken = typeof handlers === "function" ? handlers : (handlers.onToken ?? (async () => {}));
-  const onReset = typeof handlers === "function" ? (async () => {}) : (handlers.onReset ?? (async () => {}));
   const groq = getGroqClient();
   const messages = ensureSystemMessage(incomingMessages);
   let sendEmailSucceeded = false;
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
     const stream = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: getModelName(),
       messages,
       temperature: 0,
       stream: true,
     });
 
     let content = "";
-    let tokenBuffer = [];        // buffer tokens until we know the type
-    let streamMode = "pending";  // "pending" | "text" | "tool"
+    let tokenBuffer = [];
+    let streamMode = "pending";
 
     for await (const chunk of stream) {
       const delta = chunk?.choices?.[0]?.delta?.content ?? "";
@@ -155,31 +158,21 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
       content += delta;
       tokenBuffer.push(delta);
 
-      // Decide stream mode once we have enough leading content
       if (streamMode === "pending") {
         const trimmed = content.trimStart();
         if (!trimmed) continue;
-
-        // Tool calls start with { or ```
         if (trimmed.startsWith("{") || trimmed.startsWith("```")) {
-          streamMode = "tool"; // suppress streaming, buffer silently
+          streamMode = "tool";
         } else {
-          streamMode = "text"; // will decide later whether to stream
-          // DON'T flush yet - wait until we know there's no trailing tool call
+          streamMode = "text";
         }
-        continue;
       }
-
-      // Keep accumulating - we'll process at the end
     }
 
     const finalContent = formatFinalResponse(content);
     const toolCall = parseToolCall(finalContent);
 
-    // If there's a tool call anywhere in the content, don't stream anything
-    // The model will provide context in the next response after tool execution
     if (toolCall) {
-      // It's a tool call — execute silently (no tokens emitted this step)
       const result = await executeTool({
         function: {
           name: toolCall.tool,
@@ -196,7 +189,6 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
       continue;
     }
 
-    // If content still appears to contain tool payload text, suppress it and retry.
     if (containsToolPayloadHeuristic(finalContent)) {
       messages.push({ role: "assistant", content: finalContent });
       messages.push({
@@ -207,7 +199,6 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
       continue;
     }
 
-    // No tool call - safe to stream the entire content
     if (streamMode === "text") {
       for (const bufferedToken of tokenBuffer) {
         await onToken(bufferedToken);
@@ -216,7 +207,6 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
       await onToken(finalContent);
     }
 
-    // Handle unknown tool recovery
     try {
       const parsed = JSON.parse(finalContent);
       const requestedTool = typeof parsed?.tool === "string" ? parsed.tool.trim() : "";
@@ -229,7 +219,7 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
         continue;
       }
     } catch {
-      // Not a direct JSON tool call
+      // Not a direct JSON tool call.
     }
 
     if (claimsEmailSent(finalContent) && !sendEmailSucceeded) {
