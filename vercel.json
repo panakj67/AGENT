@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "installCommand": "cd client && pnpm install",
+  "buildCommand": "cd client && pnpm run build",
+  "outputDirectory": "client/dist",
+  "routes": [
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ]
+}
