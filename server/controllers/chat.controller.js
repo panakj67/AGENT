@@ -1,9 +1,10 @@
 import { runAgent, runAgentStream } from "../agent.js";
 import { Conversation } from "../models/conversation.model.js";
+import mongoose from "mongoose";
 
 const inMemoryConversations = new Map();
-const MAX_CONTEXT_TOKENS = 2000;
-const MAX_CONTEXT_MESSAGES = 3;
+const DEFAULT_LIST_LIMIT = 50;
+const MAX_LIST_LIMIT = 100;
 
 function normalizeMessages(body) {
   const payload = body ?? {};
@@ -45,6 +46,35 @@ function toPublicConversation(doc) {
   };
 }
 
+function toPublicConversationSummary(doc) {
+  return {
+    id: String(doc._id ?? doc.id),
+    title: doc.title,
+    updatedAt: doc.updatedAt ?? new Date(),
+    createdAt: doc.createdAt ?? new Date(),
+  };
+}
+
+function parseListLimit(value) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_LIST_LIMIT;
+  return Math.min(parsed, MAX_LIST_LIMIT);
+}
+
+function parseBeforeDate(value) {
+  if (!value) return null;
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isMongoReady() {
+  return Conversation.db?.readyState === 1;
+}
+
+function isValidObjectId(id) {
+  return typeof id === "string" && mongoose.isValidObjectId(id);
+}
+
 function getInMemoryConversation(userId, id) {
   if (!id) return null;
   const conversation = inMemoryConversations.get(id) ?? null;
@@ -54,71 +84,45 @@ function getInMemoryConversation(userId, id) {
   return conversation;
 }
 
-async function getConversationById(userId, id) {
-  if (!id) return null;
-
-  if (Conversation.db?.readyState === 1) {
-    return Conversation.findOne({ _id: id, userId });
-  }
-
-  return getInMemoryConversation(userId, id);
-}
-
-function getConversationMessages(conversation) {
-  if (!conversation || !Array.isArray(conversation.messages)) {
-    return [];
-  }
-
-  return conversation.messages
-    .filter((message) => message && typeof message.role === "string" && typeof message.content === "string")
-    .map((message) => ({
-      role: message.role,
-      content: message.content,
-      createdAt: message.createdAt,
-    }));
-}
-
-function estimateTokensFromText(text) {
-  if (!text) return 0;
-  return Math.ceil(String(text).length / 4);
-}
-
-function trimMessagesByTokenBudget(messages, maxTokens) {
-  const trimmed = Array.isArray(messages) ? [...messages] : [];
-  while (trimmed.length > 0) {
-    const totalTokens = trimmed.reduce((sum, message) => sum + estimateTokensFromText(message.content), 0);
-    if (totalTokens <= maxTokens) break;
-    if (trimmed.length === 1) break;
-    trimmed.shift();
-  }
-  return trimmed;
-}
-
-function trimMessagesForContext(messages) {
-  const base = Array.isArray(messages) ? messages.filter(Boolean) : [];
-  const lastMessages = base.slice(-MAX_CONTEXT_MESSAGES);
-  return trimMessagesByTokenBudget(lastMessages, MAX_CONTEXT_TOKENS);
-}
-
 async function saveConversation(userId, conversationId, userMessage, assistantMessage) {
-  if (Conversation.db?.readyState === 1) {
-    const current = conversationId ? await Conversation.findOne({ _id: conversationId, userId }) : null;
+  if (isMongoReady()) {
+    const now = new Date();
+    const messagesToAppend = [userMessage, assistantMessage];
 
-    if (!current) {
-      const created = await Conversation.create({
-        userId,
-        title: normalizeTitle([userMessage]),
-        messages: [userMessage, assistantMessage],
-      });
-      return toPublicConversation(created);
+    if (conversationId && isValidObjectId(conversationId)) {
+      const updated = await Conversation.findOneAndUpdate(
+        { _id: conversationId, userId },
+        {
+          $push: { messages: { $each: messagesToAppend } },
+          $set: { updatedAt: now },
+        },
+        {
+          returnDocument: "after",
+          lean: true,
+        },
+      );
+
+      if (updated) {
+        if (updated.title === "New conversation") {
+          const nextTitle = normalizeTitle(updated.messages);
+          if (nextTitle !== "New conversation") {
+            await Conversation.updateOne(
+              { _id: updated._id, userId, title: "New conversation" },
+              { $set: { title: nextTitle } },
+            );
+            updated.title = nextTitle;
+          }
+        }
+        return toPublicConversation(updated);
+      }
     }
 
-    current.messages.push(userMessage, assistantMessage);
-    if (current.title === "New conversation") {
-      current.title = normalizeTitle(current.messages);
-    }
-    await current.save();
-    return toPublicConversation(current);
+    const created = await Conversation.create({
+      userId,
+      title: normalizeTitle([userMessage]),
+      messages: messagesToAppend,
+    });
+    return toPublicConversation(created.toObject());
   }
 
   const id = conversationId && inMemoryConversations.has(conversationId)
@@ -165,7 +169,9 @@ function initializeSse(res) {
 }
 
 function writeSseEvent(res, payload) {
+  if (res.writableEnded || res.destroyed) return false;
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  return true;
 }
 
 export async function chat(req, res) {
@@ -189,9 +195,6 @@ export async function chat(req, res) {
       return res.status(400).json({ error: "Last message must be a user message" });
     }
 
-    const existingConversation = await getConversationById(userId, normalized.conversationId);
-    const historyMessages = getConversationMessages(existingConversation);
-
     const messageTime = new Date();
     const latestUserMessage = {
       role: "user",
@@ -202,17 +205,28 @@ export async function chat(req, res) {
 
     if (wantsStreamingResponse(req)) {
       initializeSse(res);
+      let clientClosed = false;
+      req.on("close", () => {
+        clientClosed = true;
+      });
 
       let streamedReply = "";
       try {
         streamedReply = await runAgentStream(agentMessages, {
           userId,
           userEmail: req.user?.email,
-        }, async (token) => {
-          if (!token) return;
-          writeSseEvent(res, { type: "token", token });
+        }, {
+          onToken: async (token) => {
+            if (!token || clientClosed) return;
+            writeSseEvent(res, { type: "token", token });
+          },
+          onReset: async () => {
+            if (clientClosed) return;
+            writeSseEvent(res, { type: "reset" });
+          },
         });
       } catch (error) {
+        if (clientClosed) return res.end();
         if (error.message === "GROQ_API_KEY is not configured") {
           streamedReply = fallbackReplyForMissingProvider();
           writeSseEvent(res, { type: "token", token: streamedReply });
@@ -238,12 +252,14 @@ export async function chat(req, res) {
         assistantMessage,
       );
 
-      writeSseEvent(res, {
-        type: "done",
-        reply: streamedReply,
-        conversationId: conversation.id,
-        conversation,
-      });
+      if (!clientClosed) {
+        writeSseEvent(res, {
+          type: "done",
+          reply: streamedReply,
+          conversationId: conversation.id,
+          conversation,
+        });
+      }
       return res.end();
     }
 
@@ -288,16 +304,28 @@ export async function listConversations(req, res) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    if (Conversation.db?.readyState === 1) {
-      const conversations = await Conversation.find({ userId }).sort({ updatedAt: -1 }).limit(50);
-      return res.json(conversations.map(toPublicConversation));
+    const limit = parseListLimit(req.query?.limit);
+    const before = parseBeforeDate(req.query?.before);
+    const mongoFilter = before ? { userId, updatedAt: { $lt: before } } : { userId };
+
+    if (isMongoReady()) {
+      const conversations = await Conversation.find(mongoFilter)
+        .sort({ updatedAt: -1 })
+        .limit(limit)
+        .select({ _id: 1, title: 1, updatedAt: 1, createdAt: 1 })
+        .lean();
+      return res.json(conversations.map(toPublicConversationSummary));
     }
 
-    const conversations = [...inMemoryConversations.values()]
+    let conversations = [...inMemoryConversations.values()]
       .filter((conversation) => conversation.userId === userId)
       .sort((a, b) => b.updatedAt - a.updatedAt);
-    
-    return res.json(conversations);
+    if (before) {
+      conversations = conversations.filter((conversation) => new Date(conversation.updatedAt) < before);
+    }
+    conversations = conversations.slice(0, limit);
+
+    return res.json(conversations.map(toPublicConversationSummary));
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch conversations", details: error.message });
   }
@@ -312,8 +340,11 @@ export async function getConversation(req, res) {
 
     const { id } = req.params;
 
-    if (Conversation.db?.readyState === 1) {
-      const conversation = await Conversation.findOne({ _id: id, userId });
+    if (isMongoReady()) {
+      if (!isValidObjectId(id)) {
+        return res.status(404).json({ error: "Conversation not found" });
+      }
+      const conversation = await Conversation.findOne({ _id: id, userId }).lean();
       if (!conversation) {
         return res.status(404).json({ error: "Conversation not found" });
       }
@@ -340,9 +371,12 @@ export async function deleteConversation(req, res) {
 
     const { id } = req.params;
 
-    if (Conversation.db?.readyState === 1) {
-      const deleted = await Conversation.findOneAndDelete({ _id: id, userId });
-      if (!deleted) {
+    if (isMongoReady()) {
+      if (!isValidObjectId(id)) {
+        return res.status(404).json({ error: "Conversation not found" });
+      }
+      const deleted = await Conversation.deleteOne({ _id: id, userId });
+      if (!deleted?.deletedCount) {
         return res.status(404).json({ error: "Conversation not found" });
       }
       return res.json({ success: true, id });

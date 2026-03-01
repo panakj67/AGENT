@@ -39,4 +39,10 @@ const ConversationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Hot-path indexes for concurrent read/write traffic:
+// - list by user with newest first
+// - point lookups by user + conversation id
+ConversationSchema.index({ userId: 1, updatedAt: -1 });
+ConversationSchema.index({ userId: 1, _id: 1 });
+
 export const Conversation = mongoose.models.Conversation || mongoose.model("Conversation", ConversationSchema);

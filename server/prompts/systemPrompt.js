@@ -30,6 +30,10 @@ TOOL RULES:
 1. If a tool is needed, respond with ONLY JSON {"tool":"tool_name","arguments":{...}}
 2. No markdown while calling tools.
 3. Use only tools listed in "Available tools".
+4. NEVER include explanatory text, prefaces, or follow-up sentences before/after a tool JSON call.
+5. NEVER show raw tool JSON to the user. Tool calls are internal actions only.
+6. For send_email, ALWAYS provide complete content in "body". NEVER use placeholders like "...", "etc.", or "summary omitted".
+7. NEVER claim an email was sent unless send_email was successfully executed.
 
 Available tools: ${JSON.stringify(AVAILABLE_TOOLS)}`;
 }

@@ -7,12 +7,16 @@ function normalizeToolCall(candidate) {
     return null;
   }
 
-  const tool = typeof candidate.tool === "string" ? candidate.tool.trim() : "";
+  const tool = typeof candidate.tool === "string"
+    ? candidate.tool.trim()
+    : typeof candidate.name === "string"
+      ? candidate.name.trim()
+      : "";
   if (!tool || !KNOWN_TOOL_NAMES.has(tool)) {
     return null;
   }
 
-  const args = candidate.arguments;
+  const args = candidate.arguments ?? candidate.parameters;
   const argumentsObject = args && typeof args === "object" && !Array.isArray(args) ? args : {};
 
   return { tool, arguments: argumentsObject };
@@ -24,12 +28,14 @@ function normalizeOpenAIToolCall(candidate) {
   }
 
   const fn = candidate.function;
-  const tool = typeof fn?.name === "string" ? fn.name.trim() : "";
+  const topLevelName = typeof candidate?.name === "string" ? candidate.name.trim() : "";
+  const functionName = typeof fn?.name === "string" ? fn.name.trim() : "";
+  const tool = functionName || topLevelName;
   if (!tool || !KNOWN_TOOL_NAMES.has(tool)) {
     return null;
   }
 
-  const args = fn?.arguments ?? fn?.parameters;
+  const args = fn?.arguments ?? fn?.parameters ?? candidate?.arguments ?? candidate?.parameters;
   if (!args) {
     return { tool, arguments: {} };
   }
@@ -148,6 +154,10 @@ export function parseToolCall(content) {
   for (const jsonBlock of jsonBlocks) {
     try {
       const parsed = JSON.parse(jsonBlock);
+      const normalizedOpenAI = normalizeOpenAIToolCall(parsed);
+      if (normalizedOpenAI) {
+        return normalizedOpenAI;
+      }
       const normalized = normalizeToolCall(parsed);
       if (normalized) {
         return normalized;

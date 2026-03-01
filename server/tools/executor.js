@@ -22,6 +22,50 @@ function parseArguments(rawArgs) {
   }
 }
 
+function normalizeEmailBody(rawBody) {
+  const text = String(rawBody ?? "").replace(/\r\n/g, "\n");
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const cleanedLines = [];
+  const seen = new Set();
+  let previousLine = "";
+
+  for (const line of lines) {
+    let normalizedLine = line;
+
+    // Convert markdown table rows into readable plain text rows.
+    if (/^\|.*\|$/.test(normalizedLine)) {
+      const cells = normalizedLine
+        .split("|")
+        .map((cell) => cell.trim())
+        .filter(Boolean);
+      const isSeparator = cells.length > 0 && cells.every((cell) => /^-+$/.test(cell));
+      if (isSeparator) continue;
+      normalizedLine = cells.join(" | ");
+    }
+
+    // Remove duplicated intro phrase if repeated across lines.
+    normalizedLine = normalizedLine.replace(
+      /^(Here is a short executive summary[^:]*:\s*)+/i,
+      "Here is a short executive summary:\n",
+    );
+
+    const dedupeKey = normalizedLine.toLowerCase();
+    if (dedupeKey === previousLine || seen.has(dedupeKey)) {
+      continue;
+    }
+
+    seen.add(dedupeKey);
+    previousLine = dedupeKey;
+    cleanedLines.push(normalizedLine);
+  }
+
+  return cleanedLines.join("\n");
+}
+
 async function searchWeb({ query }) {
   const response = await axios.post("https://api.tavily.com/search", {
     api_key: process.env.TAVILY_API_KEY,
@@ -34,6 +78,24 @@ async function searchWeb({ query }) {
 }
 
 async function sendEmail({ to, subject, body }) {
+  const normalizedBody = normalizeEmailBody(body).trim();
+  const hasTemplatePlaceholder = /\{\{[\s\S]*\}\}/.test(normalizedBody);
+  const placeholderLikeBody =
+    !normalizedBody
+    || hasTemplatePlaceholder
+    || normalizedBody.length < 80
+    || (
+      normalizedBody.includes("...")
+      && !normalizedBody.includes("\n")
+      && normalizedBody.length < 240
+    );
+
+  if (placeholderLikeBody) {
+    throw new Error(
+      "Email body appears incomplete or placeholder-like. Provide a full, detailed body before sending.",
+    );
+  }
+
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
@@ -46,7 +108,7 @@ async function sendEmail({ to, subject, body }) {
     from: process.env.EMAIL_USER,
     to,
     subject,
-    text: body,
+    text: normalizedBody,
   });
 
   return { success: true, message: `Email sent to ${to}` };

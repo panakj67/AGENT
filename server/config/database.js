@@ -15,6 +15,10 @@ export async function connectDatabase() {
 
   await mongoose.connect(uri, {
     serverSelectionTimeoutMS: 5000,
+    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 100,
+    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 10,
+    maxIdleTimeMS: Number(process.env.MONGO_MAX_IDLE_TIME_MS) || 30000,
+    waitQueueTimeoutMS: Number(process.env.MONGO_WAIT_QUEUE_TIMEOUT_MS) || 10000,
   });
 
   hasConnected = true;

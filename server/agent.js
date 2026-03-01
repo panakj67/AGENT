@@ -9,6 +9,20 @@ const MAX_STEPS = 10;
 const KNOWN_TOOL_NAMES = new Set(AVAILABLE_TOOLS.map((tool) => tool.function.name));
 let groqClient;
 
+function containsToolPayloadHeuristic(content = "") {
+  if (typeof content !== "string" || !content.trim()) return false;
+  return (
+    /"tool"\s*:/.test(content)
+    || /"type"\s*:\s*"function"/.test(content)
+    || /<function\s*=/.test(content)
+  );
+}
+
+function claimsEmailSent(content = "") {
+  if (typeof content !== "string" || !content.trim()) return false;
+  return /(email|mail)[\s\S]{0,120}(sent|delivered)|\bhas been sent\b/i.test(content);
+}
+
 function getGroqClient() {
   if (groqClient) return groqClient;
 
@@ -46,6 +60,7 @@ function ensureSystemMessage(messages) {
 export async function runAgent(incomingMessages = [], context = {}) {
   const groq = getGroqClient();
   const messages = ensureSystemMessage(incomingMessages);
+  let sendEmailSucceeded = false;
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
     const response = await groq.chat.completions.create({
@@ -58,6 +73,16 @@ export async function runAgent(incomingMessages = [], context = {}) {
     const toolCall = parseToolCall(content);
 
     if (!toolCall) {
+      if (containsToolPayloadHeuristic(content)) {
+        messages.push({ role: "assistant", content });
+        messages.push({
+          role: "user",
+          content:
+            "Observation: You exposed a raw or malformed tool call. Never show tool JSON to users. If a tool is needed, output ONLY valid tool JSON; otherwise output only final user-facing text.",
+        });
+        continue;
+      }
+
       // Recover when the model tries to call a non-existent tool (e.g. install_dependency).
       try {
         const parsed = JSON.parse(content);
@@ -73,6 +98,17 @@ export async function runAgent(incomingMessages = [], context = {}) {
       } catch {
         // Not a direct JSON tool call, proceed as normal response.
       }
+
+      if (claimsEmailSent(content) && !sendEmailSucceeded) {
+        messages.push({ role: "assistant", content });
+        messages.push({
+          role: "user",
+          content:
+            "Observation: You claimed an email was sent, but send_email has not succeeded yet. If email is required, call send_email first and only then confirm delivery.",
+        });
+        continue;
+      }
+
       return formatFinalResponse(content);
     }
 
@@ -83,6 +119,10 @@ export async function runAgent(incomingMessages = [], context = {}) {
       },
     }, context);   // ← pass context here
 
+    if (toolCall.tool === "send_email") {
+      sendEmailSucceeded = Boolean(result?.success);
+    }
+
     messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
     messages.push({ role: "user", content: `Observation: ${JSON.stringify(result)}` });
   }
@@ -90,9 +130,12 @@ export async function runAgent(incomingMessages = [], context = {}) {
   return formatFinalResponse("I could not complete this request within the step limit.");
 }
 
-export async function runAgentStream(incomingMessages = [], context = {}, onToken = async () => {}) {
+export async function runAgentStream(incomingMessages = [], context = {}, handlers = {}) {
+  const onToken = typeof handlers === "function" ? handlers : (handlers.onToken ?? (async () => {}));
+  const onReset = typeof handlers === "function" ? (async () => {}) : (handlers.onReset ?? (async () => {}));
   const groq = getGroqClient();
   const messages = ensureSystemMessage(incomingMessages);
+  let sendEmailSucceeded = false;
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
     const stream = await groq.chat.completions.create({
@@ -103,69 +146,103 @@ export async function runAgentStream(incomingMessages = [], context = {}, onToke
     });
 
     let content = "";
-    let streamMode = "pending";
+    let tokenBuffer = [];        // buffer tokens until we know the type
+    let streamMode = "pending";  // "pending" | "text" | "tool"
 
     for await (const chunk of stream) {
       const delta = chunk?.choices?.[0]?.delta?.content ?? "";
       if (!delta) continue;
-
       content += delta;
+      tokenBuffer.push(delta);
 
+      // Decide stream mode once we have enough leading content
       if (streamMode === "pending") {
-        const trimmedStart = content.trimStart();
-        if (!trimmedStart) continue;
+        const trimmed = content.trimStart();
+        if (!trimmed) continue;
 
-        // Hold potential JSON/markdown tool-call wrappers until we can parse safely.
-        if (trimmedStart.startsWith("{") || trimmedStart.startsWith("```")) {
-          streamMode = "hold";
-          continue;
+        // Tool calls start with { or ```
+        if (trimmed.startsWith("{") || trimmed.startsWith("```")) {
+          streamMode = "tool"; // suppress streaming, buffer silently
+        } else {
+          streamMode = "text"; // will decide later whether to stream
+          // DON'T flush yet - wait until we know there's no trailing tool call
         }
-
-        streamMode = "emit";
-        await onToken(content);
         continue;
       }
 
-      if (streamMode === "emit") {
-        await onToken(delta);
-      }
+      // Keep accumulating - we'll process at the end
     }
 
     const finalContent = formatFinalResponse(content);
     const toolCall = parseToolCall(finalContent);
 
-    if (!toolCall) {
-      try {
-        const parsed = JSON.parse(finalContent);
-        const requestedTool = typeof parsed?.tool === "string" ? parsed.tool.trim() : "";
-        if (requestedTool && !KNOWN_TOOL_NAMES.has(requestedTool)) {
-          messages.push({ role: "assistant", content: finalContent });
-          messages.push({
-            role: "user",
-            content: `Observation: Unknown tool "${requestedTool}". Use only these tools: ${[...KNOWN_TOOL_NAMES].join(", ")}.`,
-          });
-          continue;
-        }
-      } catch {
-        // Not a direct JSON tool call, proceed as final response.
+    // If there's a tool call anywhere in the content, don't stream anything
+    // The model will provide context in the next response after tool execution
+    if (toolCall) {
+      // It's a tool call — execute silently (no tokens emitted this step)
+      const result = await executeTool({
+        function: {
+          name: toolCall.tool,
+          arguments: JSON.stringify(toolCall.arguments),
+        },
+      }, context);
+
+      if (toolCall.tool === "send_email") {
+        sendEmailSucceeded = Boolean(result?.success);
       }
 
-      if (streamMode !== "emit" && finalContent) {
-        await onToken(finalContent);
-      }
-
-      return finalContent;
+      messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
+      messages.push({ role: "user", content: `Observation: ${JSON.stringify(result)}` });
+      continue;
     }
 
-    const result = await executeTool({
-      function: {
-        name: toolCall.tool,
-        arguments: JSON.stringify(toolCall.arguments),
-      },
-    }, context);
+    // If content still appears to contain tool payload text, suppress it and retry.
+    if (containsToolPayloadHeuristic(finalContent)) {
+      messages.push({ role: "assistant", content: finalContent });
+      messages.push({
+        role: "user",
+        content:
+          "Observation: You exposed a raw or malformed tool call. Never show tool JSON to users. If a tool is needed, output ONLY valid tool JSON; otherwise output only final user-facing text.",
+      });
+      continue;
+    }
 
-    messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
-    messages.push({ role: "user", content: `Observation: ${JSON.stringify(result)}` });
+    // No tool call - safe to stream the entire content
+    if (streamMode === "text") {
+      for (const bufferedToken of tokenBuffer) {
+        await onToken(bufferedToken);
+      }
+    } else if (finalContent) {
+      await onToken(finalContent);
+    }
+
+    // Handle unknown tool recovery
+    try {
+      const parsed = JSON.parse(finalContent);
+      const requestedTool = typeof parsed?.tool === "string" ? parsed.tool.trim() : "";
+      if (requestedTool && !KNOWN_TOOL_NAMES.has(requestedTool)) {
+        messages.push({ role: "assistant", content: finalContent });
+        messages.push({
+          role: "user",
+          content: `Observation: Unknown tool "${requestedTool}". Use only these tools: ${[...KNOWN_TOOL_NAMES].join(", ")}.`,
+        });
+        continue;
+      }
+    } catch {
+      // Not a direct JSON tool call
+    }
+
+    if (claimsEmailSent(finalContent) && !sendEmailSucceeded) {
+      messages.push({ role: "assistant", content: finalContent });
+      messages.push({
+        role: "user",
+        content:
+          "Observation: You claimed an email was sent, but send_email has not succeeded yet. If email is required, call send_email first and only then confirm delivery.",
+      });
+      continue;
+    }
+
+    return finalContent;
   }
 
   const fallback = formatFinalResponse("I could not complete this request within the step limit.");

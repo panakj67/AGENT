@@ -1,4 +1,5 @@
 import { Plus, MessageCircle, Search, Trash2 } from 'lucide-react';
+import { memo, useMemo } from 'react';
 import ThemedButton from './ThemedButton';
 import SettingsDropdown from './SettingsDropdown';
 import { useTheme } from '@/components/providers/ThemeProvider';
@@ -36,11 +37,13 @@ export default function ChatSidebar({
 }) {
     const { theme } = useTheme();
     const userAvatarClass = themeUserAvatarClasses[theme] || themeUserAvatarClasses.default;
-    const groupedHistory = chatHistory.reduce((acc, chat) => {
-      const bucket = toDateKey(chat.updatedAt || chat.createdAt);
-      acc[bucket].push(chat);
-      return acc;
-    }, { today: [], last7: [], earlier: [] });
+    const groupedHistory = useMemo(() => {
+      return chatHistory.reduce((acc, chat) => {
+        const bucket = toDateKey(chat.updatedAt || chat.createdAt);
+        acc[bucket].push(chat);
+        return acc;
+      }, { today: [], last7: [], earlier: [] });
+    }, [chatHistory]);
 
     return (<aside className="w-full h-screen bg-white border-r border-gray-200 flex flex-col overflow-visible">
       {/* Header */}
@@ -127,12 +130,23 @@ export default function ChatSidebar({
       </div>
     </aside>);
 }
-function ChatHistoryItem({ title, onClick, onDelete, isActive }) {
-    return (<div className={`w-full text-left cursor-pointer px-3 py-1.5 md:py-2 rounded-lg text-xs md:text-sm text-gray-700 transition-colors truncate flex items-center gap-2 group ${isActive ? 'bg-gray-100' : 'hover:bg-gray-100'}`}>
-      <button onClick={onClick} className="flex-1 min-w-0 flex items-center gap-2 text-left">
+const ChatHistoryItem = memo(function ChatHistoryItem({ title, onClick, onDelete, isActive }) {
+    return (<div
+      onClick={onClick}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onClick?.();
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      className={`w-full text-left cursor-pointer px-3 py-2 md:py-2.5 rounded-lg text-xs md:text-sm text-gray-700 transition-colors truncate flex items-center gap-2 group ${isActive ? 'bg-gray-100' : 'hover:bg-gray-100'} focus:outline-none focus:ring-2 focus:ring-indigo-400/40`}
+    >
+      <div className="flex-1 min-w-0 flex items-center gap-2 text-left">
         <MessageCircle size={14} className="md:w-4 md:h-4 text-gray-400 flex-shrink-0 group-hover:text-gray-500"/>
-        <span className="truncate cursor-pointer">{title}</span>
-      </button>
+        <span className="truncate cursor-pointer leading-6">{title}</span>
+      </div>
       <button
         type="button"
         onClick={(event) => {
@@ -146,4 +160,4 @@ function ChatHistoryItem({ title, onClick, onDelete, isActive }) {
         <Trash2 size={14} className="md:w-4 md:h-4"/>
       </button>
     </div>);
-}
+});

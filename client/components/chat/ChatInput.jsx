@@ -59,7 +59,7 @@ export default function ChatInput({ onSend, disabled }) {
         <div className="relative">
 
             {/* ⭐ Fade overlay (ChatGPT effect) */}
-            <div className="pointer-events-none absolute -top-10 left-0 right-0 h-10 bg-gradient-to-t from-white via-white/20 to-transparent" />
+            {/* <div className="pointer-events-none absolute -top-10 left-0 right-0 h-10 bg-gradient-to-t from-white via-white/20 to-transparent" /> */}
 
             {/* ⭐ Input area */}
             <div className="bg-gradient-to-b from-white via-white to-gray-50 pt-1 pb-4 sm:pb-6 md:pb-8">
