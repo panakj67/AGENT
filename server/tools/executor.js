@@ -10,6 +10,7 @@ import {
 } from "./browser.js"
 
 import { Task } from "../models/task.model.js"
+import { parseIST, formatIST, parseRelativeIST } from "../utils/timezone.js"
 
 function parseArguments(rawArgs) {
   if (!rawArgs) return {};
@@ -59,11 +60,34 @@ async function searchWeb({ query }) {
   const response = await axios.post("https://api.tavily.com/search", {
     api_key: process.env.TAVILY_API_KEY,
     query,
-    max_results: 5,
+    max_results: 3,
+    include_answer: true,
   });
 
   const results = Array.isArray(response.data?.results) ? response.data.results : [];
-  return results.map((item) => `${item.title}: ${item.content}`).join("\n");
+  
+  // Extract and clean results, removing nav/menu clutter
+  return results
+    .map((item) => {
+      // Get clean content: remove navigation, menus, language links, etc.
+      let content = item.content || "";
+      
+      // Remove common navigation patterns
+      content = content
+        .replace(/\[.*?\]\(.*?\)/g, "") // Remove markdown links
+        .replace(/\|.*?\|/g, "|...") // Truncate table formatting
+        .replace(/\[[^\]]+\]/g, "") // Remove bracket navigation
+        .replace(/([A-Z][a-z]+\s+){5,}/g, (match) => match.split("\s+").slice(0, 3).join(" ") + "..."); // Limit repetitive terms
+      
+      // Extract first meaningful paragraph (max 300 chars)
+      const paragraphs = content.split("\n\n");
+      const meaningful = paragraphs.find(p => p.trim().length > 20 && p.trim().length < 500) || paragraphs[0];
+      const truncated = meaningful?.substring(0, 300).trim() || "";
+      
+      return `${item.title}: ${truncated}`;
+    })
+    .filter((item) => item.length > 10) // Remove empty results
+    .join("\n\n");
 }
 
 // In server/tools/executor.js
@@ -370,12 +394,23 @@ async function getCryptoPrice({ coin, currency = "usd" }) {
 }
 
 async function saveTask({ title, description, due_at, recurring = "none", recurring_time = null }, userId, userEmail) {
+  // Handle IST date parsing
+  let dueAtIST = null;
+  if (due_at) {
+    // Try parsing as relative time first (e.g., "tomorrow at 10am")
+    dueAtIST = parseRelativeIST(due_at);
+    // If not relative, parse as ISO string
+    if (!dueAtIST) {
+      dueAtIST = parseIST(due_at);
+    }
+  }
+
   const task = await Task.create({
     userId,
     userEmail,
     title,
     description: description || "",
-    dueAt: due_at ? new Date(due_at) : null,
+    dueAt: dueAtIST,
     recurring,
     recurringTime: recurring_time
   })
@@ -383,7 +418,7 @@ async function saveTask({ title, description, due_at, recurring = "none", recurr
   return { 
     success: true, 
     task_id: task._id,
-    message: `Task saved: "${title}"${due_at ? ` — reminder at ${new Date(due_at).toLocaleString()}` : ""}`
+    message: `Task saved: "${title}"${dueAtIST ? ` — reminder at ${formatIST(dueAtIST)}` : ""}`
   }
 }
 
@@ -404,6 +439,7 @@ async function getTasks({ include_completed = false }, userId) {
       title: t.title,
       description: t.description,
       dueAt: t.dueAt,
+      dueAtIST: formatIST(t.dueAt),
       recurring: t.recurring,
       completed: t.completed
     }))

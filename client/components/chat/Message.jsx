@@ -219,25 +219,6 @@ const markdownComponentsInvert = {
     },
 };
 
-// ─── StreamingMarkdown ────────────────────────────────────────────────────
-// Renders full Markdown WHILE tokens arrive — no plain-text flash.
-// The blinking cursor is appended outside the markdown parser so it
-// doesn't interfere with list/bold rendering.
-function StreamingMarkdown({ content }) {
-    return (
-        <div
-            className="text-[14px] sm:text-[15px] leading-relaxed break-words whitespace-pre-wrap min-h-[1.25rem]"
-        >
-            {content || (
-                <span className="inline-flex gap-1 py-1" aria-label="Thinking">
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" />
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.15s' }} />
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.3s' }} />
-                </span>
-            )}
-        </div>
-    );
-}
 // ─── Message ──────────────────────────────────────────────────────────────
 const Message = memo(function Message({
     role,
@@ -245,7 +226,6 @@ const Message = memo(function Message({
     createdAt,
     isLastMessage,
     user,
-    isStreaming = false,
 }) {
     const [copied, setCopied] = useState(false);
     const { theme } = useTheme();
@@ -300,9 +280,6 @@ const Message = memo(function Message({
                                 {content}
                             </ReactMarkdown>
                         </div>
-                    ) : isStreaming ? (
-                        // ReactMarkdown runs on every content update while streaming
-                        <StreamingMarkdown content={content} />
                     ) : (
                         <div className="text-[14px] sm:text-[15px] leading-relaxed break-words min-w-0">
                             <ReactMarkdown remarkPlugins={[remarkGfm, remarkHighlight]} components={markdownComponents}>
@@ -313,7 +290,7 @@ const Message = memo(function Message({
                 </div>
 
                 {/* ── Actions — Image 2 layout: icons | separator | Regenerate ── */}
-                {!isUser && isLastMessage && !isStreaming && (
+                {!isUser && isLastMessage && (
                     <div className="flex items-center justify-between w-full mt-2 px-1
                         opacity-0 group-hover:opacity-100 transition-opacity duration-150">
                         <div className="flex items-center gap-0.5 text-gray-400">
@@ -370,7 +347,6 @@ const Message = memo(function Message({
     && prev.createdAt     === next.createdAt
     && prev.isLastMessage === next.isLastMessage
     && prev.user          === next.user
-    && prev.isStreaming    === next.isStreaming
 ));
 
 export default Message;

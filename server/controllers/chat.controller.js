@@ -1,4 +1,4 @@
-import { runAgent, runAgentStream } from "../agent.js";
+import { runAgent } from "../agent.js";
 import { Conversation } from "../models/conversation.model.js";
 import mongoose from "mongoose";
 
@@ -135,97 +135,7 @@ function fallbackReplyForMissingProvider() {
   return "AI provider is not configured on the server yet. Please set `GROQ_API_KEY` to enable live assistant responses.";
 }
 
-// ─── SSE helper ───────────────────────────────────────────────────────────────
-
-function sendSseEvent(res, payload) {
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
-}
-
-// ─── Streaming chat handler ────────────────────────────────────────────────────
-
-export async function chatStream(req, res) {
-  const userId = req.user?.id;
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
-  const normalized = normalizeMessages(req.body);
-  if (!normalized) {
-    return res.status(400).json({ error: "Request body must include 'messages' or 'message'" });
-  }
-
-  const incomingMessages = normalized.messages;
-  const userMessage = incomingMessages[incomingMessages.length - 1];
-  if (!userMessage || userMessage.role !== "user") {
-    return res.status(400).json({ error: "Last message must be a user message" });
-  }
-
-  // Set SSE headers
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering if behind proxy
-  res.flushHeaders();
-
-  const messageTime = new Date();
-  const latestUserMessage = {
-    role: "user",
-    content: String(userMessage.content),
-    createdAt: messageTime,
-  };
-
-  let reply = "";
-
-  try {
-    reply = await runAgentStream(
-      [latestUserMessage],
-      { userId, userEmail: req.user?.email },
-      {
-        onToken: async (token) => {
-          sendSseEvent(res, { type: "token", token });
-        },
-      }
-    );
-  } catch (error) {
-    if (error.message === "GROQ_API_KEY is not configured") {
-      reply = fallbackReplyForMissingProvider();
-      sendSseEvent(res, { type: "token", token: reply });
-    } else {
-      console.error("[chatStream] Agent error:", error.message);
-      sendSseEvent(res, { type: "error", error: "Agent failed", details: error.message });
-      res.end();
-      return;
-    }
-  }
-
-  // Save conversation
-  let conversation = null;
-  try {
-    const assistantMessage = {
-      role: "assistant",
-      content: reply,
-      createdAt: new Date(),
-    };
-    conversation = await saveConversation(
-      userId,
-      normalized.conversationId,
-      latestUserMessage,
-      assistantMessage
-    );
-  } catch (error) {
-    console.error("[chatStream] Save error:", error.message);
-  }
-
-  // Send done event — this is what the frontend waits for
-  sendSseEvent(res, {
-    type: "done",
-    reply,
-    conversationId: conversation?.id ?? null,
-    conversation: conversation ?? null,
-  });
-
-  res.end();
-}
-
-// ─── Non-streaming chat handler ────────────────────────────────────────────────
+// ─── Chat handler ─────────────────────────────────────────────────────────────
 
 export async function chat(req, res) {
   try {

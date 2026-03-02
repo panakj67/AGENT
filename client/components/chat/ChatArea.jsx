@@ -1,5 +1,5 @@
 import Message from './Message';
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { useTheme } from '@/components/providers/ThemeProvider';
 
 const themeAvatarClasses = {
@@ -15,24 +15,11 @@ export default function ChatArea({
     user,
     isLoading,
     isSelectingChat = false,
-    streamingMessageId,
-    streamingContent = '',
 }) {
     const { theme } = useTheme();
     const messagesEndRef = useRef(null);
     const lastMessageRef = useRef(null);
     const wasSelectingRef = useRef(false);
-
-    // Only show the streaming placeholder once it has content — avoids a
-    // blank flash before the first token arrives.
-    const visibleMessages = useMemo(() => {
-        return messages.filter((message) => {
-            if (!isLoading) return true;
-            if (!streamingMessageId) return true;
-            if (message.id !== streamingMessageId) return true;
-            return Boolean((message.content || '').trim());
-        });
-    }, [messages, isLoading, streamingMessageId]);
 
     useEffect(() => {
         const justFinishedSelecting = wasSelectingRef.current && !isSelectingChat;
@@ -80,34 +67,18 @@ export default function ChatArea({
                     </div>
                 ) : (
                     <>
-                        {visibleMessages.map((message, index) => {
-                            const isStreaming = message.id === streamingMessageId;
-                            const isLastVisibleMessage = index === visibleMessages.length - 1;
+                        {messages.map((message, index) => {
+                            const isLastMessage = index === messages.length - 1;
                             return (
-                                <div key={message.id} ref={isLastVisibleMessage ? lastMessageRef : null}>
+                                <div key={message.id} ref={isLastMessage ? lastMessageRef : null}>
                                     <Message
                                         {...message}
-                                        content={isStreaming ? (streamingContent || message.content || '') : message.content}
-                                        isLastMessage={isLastVisibleMessage}
+                                        isLastMessage={isLastMessage}
                                         user={user}
-                                        isStreaming={isStreaming}
                                     />
                                 </div>
                             );
                         })}
-
-                        {/* Streaming placeholder shown before first token arrives */}
-                        {isLoading && streamingMessageId && !visibleMessages.some((m) => m.id === streamingMessageId) && (
-                            <Message
-                                id={streamingMessageId}
-                                role="assistant"
-                                createdAt={new Date().toISOString()}
-                                isLastMessage
-                                user={user}
-                                isStreaming
-                                content={streamingContent}
-                            />
-                        )}
 
                         <div ref={messagesEndRef} />
                     </>

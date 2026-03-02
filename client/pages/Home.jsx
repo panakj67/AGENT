@@ -34,44 +34,7 @@ function toHistoryItem(chat) {
     };
 }
 
-async function consumeSseStream(response, handlers) {
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('Streaming response body is not available');
 
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        let boundaryIndex = buffer.indexOf('\n\n');
-        while (boundaryIndex !== -1) {
-            const rawEvent = buffer.slice(0, boundaryIndex).trim();
-            buffer = buffer.slice(boundaryIndex + 2);
-            boundaryIndex = buffer.indexOf('\n\n');
-
-            if (!rawEvent) continue;
-
-            const dataLine = rawEvent.split('\n').find((line) => line.startsWith('data: '));
-            if (!dataLine) continue;
-
-            let payload;
-            try {
-                payload = JSON.parse(dataLine.slice(6));
-            } catch {
-                continue;
-            }
-
-            if (payload?.type === 'token') { handlers.onToken?.(payload.token || ''); continue; }
-            if (payload?.type === 'reset') { handlers.onReset?.(); continue; }
-            if (payload?.type === 'done')  { handlers.onDone?.(payload); continue; }
-            if (payload?.type === 'error') { handlers.onError?.(payload); }
-        }
-    }
-}
 
 export default function Home({ user, onLogout }) {
     const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -80,20 +43,9 @@ export default function Home({ user, onLogout }) {
     const [chatHistory, setChatHistory] = useState([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isSelectingChat, setIsSelectingChat] = useState(false);
-    const [streamingMessageId, setStreamingMessageId] = useState(null);
-    const [streamingContent, setStreamingContent] = useState('');
     const latestSelectionRef = useRef(null);
     const conversationCacheRef = useRef(new Map());
     const selectAbortRef = useRef(null);
-
-    // ─── Streaming refs ──────────────────────────────────────────────────────
-    // We write tokens into a ref (zero re-renders) and push to the DOM
-    // via a single rAF loop. This gives butter-smooth output without
-    // hammering React's reconciler on every token.
-    const streamingIdRef       = useRef(null);   // mirrors streamingMessageId without closure stale
-    const accumulatedRef       = useRef('');      // full streamed text so far
-    const pendingChunkRef      = useRef('');      // tokens queued since last rAF flush
-    const rafRef               = useRef(null);    // rAF handle
 
     // ─── Load conversations ───────────────────────────────────────────────────
     const loadConversations = useCallback(async () => {
@@ -124,50 +76,23 @@ export default function Home({ user, onLogout }) {
 
     useEffect(() => { loadConversations(); }, [loadConversations]);
 
-    // ─── rAF flush loop ───────────────────────────────────────────────────────
-    // Flush pending streamed chunks in one React update per frame.
-    const scheduleFlush = useCallback(() => {
-        if (rafRef.current) return; // already scheduled
-        rafRef.current = requestAnimationFrame(() => {
-            rafRef.current = null;
-            const chunk = pendingChunkRef.current;
-            if (!chunk) return;
-            pendingChunkRef.current = '';
-            accumulatedRef.current += chunk;
-            setStreamingContent(accumulatedRef.current);
-        });
-    }, []);
-
-    // Cleanup rAF and in-flight selection request on unmount
-    useEffect(() => () => {
-        if (rafRef.current) cancelAnimationFrame(rafRef.current);
-        if (selectAbortRef.current) selectAbortRef.current.abort();
-    }, []);
-
     // ─── handleSendMessage ────────────────────────────────────────────────────
     const handleSendMessage = useCallback(async (message) => {
-        const assistantMessageId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-assistant`;
         const userMessage = createUiMessage('user', message);
+        const assistantMessageId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-assistant`;
 
-        // Add user message + an assistant placeholder with empty content.
+        // Add user message + assistant placeholder
         setMessages((prev) => [
             ...prev,
             userMessage,
             { id: assistantMessageId, role: 'assistant', content: '', createdAt: new Date().toISOString() },
         ]);
         setIsLoading(true);
-        setStreamingMessageId(assistantMessageId);
-        setStreamingContent('');
-
-        // Reset streaming state
-        streamingIdRef.current   = assistantMessageId;
-        accumulatedRef.current   = '';
-        pendingChunkRef.current  = '';
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/chat?stream=1`, {
+            const response = await fetch(`${API_BASE_URL}/api/chat`, {
                 method: 'POST',
-                headers: { ...authHeaders({ Accept: 'text/event-stream' }) },
+                headers: authHeaders(),
                 body: JSON.stringify({ conversationId, message }),
             });
 
@@ -177,41 +102,13 @@ export default function Home({ user, onLogout }) {
                 throw new Error(data?.details || data?.error || 'Failed to send message');
             }
 
-            let donePayload = null;
-
-            await consumeSseStream(response, {
-                onToken: (token) => {
-                    // Queue token and schedule a DOM flush — no setState
-                    pendingChunkRef.current += token;
-                    scheduleFlush();
-                },
-                onReset: () => {
-                    accumulatedRef.current = '';
-                    pendingChunkRef.current = '';
-                    setStreamingContent('');
-                },
-                onDone: (payload) => { donePayload = payload; },
-                onError: (payload) => { throw new Error(payload?.details || payload?.error || 'Stream failed'); },
-            });
-
-            // Flush any remaining tokens synchronously before committing to React state
-            if (pendingChunkRef.current) {
-                accumulatedRef.current += pendingChunkRef.current;
-                pendingChunkRef.current = '';
-            }
-            if (rafRef.current) {
-                cancelAnimationFrame(rafRef.current);
-                rafRef.current = null;
-            }
-            setStreamingContent(accumulatedRef.current);
-
-            if (!donePayload) throw new Error('Chat stream ended unexpectedly');
-
-            const nextConversationId = donePayload?.conversationId || donePayload?.conversation?.id || null;
+            const data = await response.json();
+            const nextConversationId = data?.conversationId || data?.conversation?.id || null;
             if (nextConversationId) setConversationId(String(nextConversationId));
 
-            const finalReply = donePayload?.reply || accumulatedRef.current || 'No response received.';
-            const serverConversation = donePayload?.conversation;
+            const finalReply = data?.reply || 'No response received.';
+            const serverConversation = data?.conversation;
+
             if (Array.isArray(serverConversation?.messages)) {
                 const mappedMessages = mapServerMessages(serverConversation.messages);
                 setMessages(mappedMessages);
@@ -226,7 +123,7 @@ export default function Home({ user, onLogout }) {
                 );
             }
 
-            const summarySource = donePayload?.conversation || {};
+            const summarySource = serverConversation || {};
             const summary = toHistoryItem({
                 id: String(summarySource.id || nextConversationId || ''),
                 title: summarySource.title,
@@ -240,40 +137,21 @@ export default function Home({ user, onLogout }) {
                 });
             }
 
-            setStreamingMessageId(null);
-            streamingIdRef.current = null;
-            setStreamingContent('');
-
         } catch (error) {
-            // On error, commit whatever was streamed so the user doesn't lose it
-            const partial = accumulatedRef.current || streamingContent || '';
             setMessages((prev) =>
                 prev.map((item) =>
                     item.id === assistantMessageId
-                        ? { ...item, content: partial || `Unable to reach server: ${error.message}` }
+                        ? { ...item, content: `Unable to reach server: ${error.message}` }
                         : item,
                 ),
             );
-            setStreamingMessageId(null);
-            streamingIdRef.current = null;
-            setStreamingContent('');
         } finally {
-            if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
-            accumulatedRef.current  = '';
-            pendingChunkRef.current = '';
-            setStreamingContent('');
             setIsLoading(false);
         }
-    }, [conversationId, scheduleFlush, onLogout, streamingContent]);
+    }, [conversationId, onLogout]);
 
     // ─── Other handlers ───────────────────────────────────────────────────────
     const handleNewChat = useCallback(() => {
-        // Reset any in-progress streaming
-        setStreamingMessageId(null);
-        streamingIdRef.current = null;
-        accumulatedRef.current = '';
-        setStreamingContent('');
-        setIsLoading(false);
         if (selectAbortRef.current) {
             selectAbortRef.current.abort();
             selectAbortRef.current = null;
@@ -282,6 +160,7 @@ export default function Home({ user, onLogout }) {
         latestSelectionRef.current = null;
         setMessages([]);
         setConversationId(null);
+        setIsLoading(false);
     }, []);
 
     const handleSelectChat = useCallback(async (id) => {
@@ -293,17 +172,11 @@ export default function Home({ user, onLogout }) {
             return; 
         }
 
-        // Reset any in-progress streaming immediately
-        setStreamingMessageId(null);
-        streamingIdRef.current = null;
-        accumulatedRef.current = '';
-        setStreamingContent('');
-        setIsLoading(false);
-
         setSidebarOpen(false);
         setIsSelectingChat(true);
         latestSelectionRef.current = id;
         setConversationId(id);
+        setIsLoading(false);
 
         // Render from local cache immediately for snappy UX.
         const cachedMessages = conversationCacheRef.current.get(id);
@@ -373,7 +246,11 @@ export default function Home({ user, onLogout }) {
         }
         conversationCacheRef.current.clear();
         latestSelectionRef.current = null;
-        setMessages([]); setConversationId(null); setChatHistory([]); setSidebarOpen(false); onLogout?.();
+        setMessages([]);
+        setConversationId(null);
+        setChatHistory([]);
+        setSidebarOpen(false);
+        onLogout?.();
     };
 
     return (
@@ -409,8 +286,6 @@ export default function Home({ user, onLogout }) {
                     user={user?.name ? user.name.charAt(0).toUpperCase() : 'U'}
                     isLoading={isLoading}
                     isSelectingChat={isSelectingChat}
-                    streamingMessageId={streamingMessageId}
-                    streamingContent={streamingContent}
                 />
                 <div className="sticky bottom-0 z-20">
                     <ChatInput onSend={handleSendMessage} disabled={isLoading} />
