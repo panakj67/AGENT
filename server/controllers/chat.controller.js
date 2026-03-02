@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 const inMemoryConversations = new Map();
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 100;
+const ALLOWED_MESSAGE_ROLES = new Set(["system", "user", "assistant"]);
 
 function normalizeMessages(body) {
   const payload = body ?? {};
@@ -72,6 +73,51 @@ function getInMemoryConversation(userId, id) {
   const conversation = inMemoryConversations.get(id) ?? null;
   if (!conversation || conversation.userId !== userId) return null;
   return conversation;
+}
+
+function sanitizeHistoryMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+
+  return messages
+    .filter((message) => message && ALLOWED_MESSAGE_ROLES.has(message.role))
+    .map((message) => ({
+      role: message.role,
+      content: typeof message.content === "string" ? message.content : String(message.content ?? ""),
+    }))
+    .filter((message) => message.content.trim().length > 0);
+}
+
+export function buildAgentMessages(historyMessages, latestUserMessage) {
+  const history = sanitizeHistoryMessages(historyMessages);
+
+  if (!latestUserMessage || latestUserMessage.role !== "user") {
+    return history;
+  }
+
+  return [
+    ...history,
+    {
+      role: "user",
+      content: typeof latestUserMessage.content === "string"
+        ? latestUserMessage.content
+        : String(latestUserMessage.content ?? ""),
+    },
+  ];
+}
+
+async function loadConversationHistoryMessages(userId, conversationId) {
+  if (!conversationId) return [];
+
+  if (isMongoReady() && isValidObjectId(conversationId)) {
+    const conversation = await Conversation.findOne(
+      { _id: conversationId, userId },
+      { messages: 1 }
+    ).lean();
+    return sanitizeHistoryMessages(conversation?.messages ?? []);
+  }
+
+  const inMemoryConversation = getInMemoryConversation(userId, conversationId);
+  return sanitizeHistoryMessages(inMemoryConversation?.messages ?? []);
 }
 
 async function saveConversation(userId, conversationId, userMessage, assistantMessage) {
@@ -164,7 +210,10 @@ export async function chat(req, res) {
 
     let reply;
     try {
-      reply = await runAgent([latestUserMessage], {
+      const historyMessages = await loadConversationHistoryMessages(userId, normalized.conversationId);
+      const agentMessages = buildAgentMessages(historyMessages, latestUserMessage);
+
+      reply = await runAgent(agentMessages, {
         userId,
         userEmail: req.user?.email,
       });
