@@ -46,10 +46,18 @@ function inferRequiredToolsFromPrompt(prompt = "") {
 
   const wantsNews = /\b(news|article|latest|breaking)\b/.test(text);
   if (wantsNews) {
-    required.add("search_web");
+    required.add("get_news");
   }
 
   return [...required].filter((toolName) => KNOWN_TOOL_NAMES.has(toolName));
+}
+
+function getToolCallSignature(toolCall) {
+  if (!toolCall || typeof toolCall.tool !== "string") return "";
+  const args = toolCall.arguments && typeof toolCall.arguments === "object"
+    ? toolCall.arguments
+    : {};
+  return `${toolCall.tool}:${JSON.stringify(args)}`;
 }
 
 function getAllowedToolsFromPrompt(prompt = "") {
@@ -204,6 +212,7 @@ export async function runAgent(incomingMessages = [], context = {}) {
   const messages = ensureSystemMessage(incomingMessages);
   let sendEmailSucceeded = false;
   const executedTools = new Set();
+  const repeatedToolCallCounts = new Map();
   const userPrompt = getLatestUserMessage(messages);
   const requiredTools = inferRequiredToolsFromPrompt(userPrompt);
   const allowedTools = getAllowedToolsFromPrompt(userPrompt);
@@ -278,6 +287,18 @@ export async function runAgent(incomingMessages = [], context = {}) {
       continue;
     }
 
+    const toolCallSignature = getToolCallSignature(toolCall);
+    const repetitionCount = (repeatedToolCallCounts.get(toolCallSignature) ?? 0) + 1;
+    repeatedToolCallCounts.set(toolCallSignature, repetitionCount);
+    if (repetitionCount > 1) {
+      messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
+      messages.push({
+        role: "user",
+        content: `Observation: You repeated the same tool call (${toolCall.tool}) with identical arguments. Do not repeat tool calls. Use the existing observation result and provide the final answer now.`,
+      });
+      continue;
+    }
+
     console.log(`\n[TOOL CALL] Step ${step + 1}: ${toolCall.tool}`);
     console.log(`  Arguments: ${JSON.stringify(toolCall.arguments, null, 2)}`);
 
@@ -300,7 +321,7 @@ export async function runAgent(incomingMessages = [], context = {}) {
 
     // Check if all required tools have been executed - if so, ask for final response
     const missingAfterExecution = getMissingRequiredTools(requiredTools, executedTools);
-    if (missingAfterExecution.length === 0 && requiredTools.size > 0) {
+    if (missingAfterExecution.length === 0 && requiredTools.length > 0) {
       console.log(`\n[MISSION COMPLETE] All required tools executed. Requesting final response...`);
       messages.push({
         role: "user",
@@ -318,6 +339,7 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
   const messages = ensureSystemMessage(incomingMessages);
   let sendEmailSucceeded = false;
   const executedTools = new Set();
+  const repeatedToolCallCounts = new Map();
   const userPrompt = getLatestUserMessage(messages);
   const requiredTools = inferRequiredToolsFromPrompt(userPrompt);
   const allowedTools = getAllowedToolsFromPrompt(userPrompt);
@@ -362,6 +384,18 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
         messages.push({
           role: "user",
           content: `Observation: You tried to call tool "${toolCall.tool}" which was not part of the user's request. Stick to the original task: ${userPrompt}. Only use these tools if needed: ${[...allowedTools].join(", ")}.`,
+        });
+        continue;
+      }
+
+      const toolCallSignature = getToolCallSignature(toolCall);
+      const repetitionCount = (repeatedToolCallCounts.get(toolCallSignature) ?? 0) + 1;
+      repeatedToolCallCounts.set(toolCallSignature, repetitionCount);
+      if (repetitionCount > 1) {
+        messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
+        messages.push({
+          role: "user",
+          content: `Observation: You repeated the same tool call (${toolCall.tool}) with identical arguments. Do not repeat tool calls. Use the existing observation result and provide the final answer now.`,
         });
         continue;
       }
