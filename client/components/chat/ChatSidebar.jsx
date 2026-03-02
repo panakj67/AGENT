@@ -1,5 +1,5 @@
 import { Plus, MessageCircle, Search, Trash2 } from 'lucide-react';
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useState } from 'react';
 import ThemedButton from './ThemedButton';
 import SettingsDropdown from './SettingsDropdown';
 import { useTheme } from '@/components/providers/ThemeProvider';
@@ -35,15 +35,22 @@ export default function ChatSidebar({
   onSelectChat,
   onDeleteChat,
 }) {
+    const [searchQuery, setSearchQuery] = useState('');
     const { theme } = useTheme();
     const userAvatarClass = themeUserAvatarClasses[theme] || themeUserAvatarClasses.default;
+    const filteredHistory = useMemo(() => {
+      const query = searchQuery.trim().toLowerCase();
+      if (!query) return chatHistory;
+      return chatHistory.filter((chat) => (chat.title || '').toLowerCase().includes(query));
+    }, [chatHistory, searchQuery]);
+
     const groupedHistory = useMemo(() => {
-      return chatHistory.reduce((acc, chat) => {
+      return filteredHistory.reduce((acc, chat) => {
         const bucket = toDateKey(chat.updatedAt || chat.createdAt);
         acc[bucket].push(chat);
         return acc;
       }, { today: [], last7: [], earlier: [] });
-    }, [chatHistory]);
+    }, [filteredHistory]);
 
     return (<aside className="w-full h-screen bg-white border-r border-gray-200 flex flex-col overflow-visible">
       {/* Header */}
@@ -59,7 +66,13 @@ export default function ChatSidebar({
       <div className="px-3 md:px-4 py-2 md:py-3 border-b border-gray-200 flex-shrink-0">
         <div className="relative">
           <Search size={14} className="md:w-4 md:h-4 absolute left-2 top-2.5 text-gray-400"/>
-          <input type="text" placeholder="Search chats" className="w-full pl-8 pr-3 py-2 text-xs md:text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"/>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search chats"
+            className="w-full pl-8 pr-3 py-2 text-xs md:text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-colors"
+          />
         </div>
       </div>
 
@@ -107,8 +120,10 @@ export default function ChatSidebar({
                 onDelete={() => onDeleteChat?.(chat.id)}
               />
             ))}
-            {chatHistory.length === 0 && (
-              <div className="px-3 py-2 text-xs text-gray-400">No chats yet</div>
+            {filteredHistory.length === 0 && (
+              <div className="px-3 py-2 text-xs text-gray-400">
+                {chatHistory.length === 0 ? 'No chats yet' : 'No matching chats'}
+              </div>
             )}
           </div>
         </div>

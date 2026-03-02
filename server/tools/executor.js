@@ -192,6 +192,7 @@ async function readGmailInbox({
     port,
     secure,
     auth: { user, pass },
+    logger: false,
   });
 
   const emails = [];
@@ -313,26 +314,58 @@ async function readEmailBody({ uid, folder = "INBOX" }) {
 }
 
 async function getNews({ topic, count = 5 }) {
-  const response = await axios.get(
-    "https://newsapi.org/v2/everything",
-    {
-      params: {
-        q: topic,
-        pageSize: count,
-        language: "en",        // English only
-        sortBy: "publishedAt", // Latest first
-        apiKey: process.env.NEWS_API_KEY
-      }
-    }
-  )
+  const apiKey = process.env.NEWS_API_KEY;
+  
+  if (!apiKey) {
+    throw new Error(
+      "News API key is missing. Get a free key from https://newsapi.org and set NEWS_API_KEY in .env"
+    );
+  }
 
-  const articles = response.data?.articles || []
-  return articles.map(a => ({
-    title: a.title,
-    source: a.source?.name,
-    publishedAt: a.publishedAt,
-    url: a.url
-  }))
+  // Use "latest" as default if topic is empty
+  const searchQuery = String(topic || "latest").trim();
+  
+  if (!searchQuery) {
+    throw new Error("Topic is required for news search. Please specify what news you're looking for.");
+  }
+
+  try {
+    const response = await axios.get(
+      "https://newsapi.org/v2/everything",
+      {
+        params: {
+          q: searchQuery,
+          pageSize: Math.min(count || 5, 100),
+          language: "en",
+          sortBy: "publishedAt",
+          apiKey: apiKey,
+        },
+        timeout: 5000, // 5 second timeout
+      }
+    );
+
+    const articles = response.data?.articles || [];
+    if (articles.length === 0) {
+      return [];
+    }
+
+    return articles.slice(0, Math.max(1, Math.min(count || 5, 100))).map((a) => ({
+      title: a.title,
+      source: a.source?.name,
+      publishedAt: a.publishedAt,
+      url: a.url,
+      description: a.description,
+    }));
+  } catch (error) {
+    if (error.response?.status === 401) {
+      throw new Error("News API key is invalid. Update NEWS_API_KEY in .env with a valid key from https://newsapi.org");
+    } else if (error.response?.status === 429) {
+      throw new Error("News API rate limit exceeded. Please try again later.");
+    } else if (error.code === "ECONNABORTED") {
+      throw new Error("News API request timeout. The service is slow, please try again.");
+    }
+    throw error;
+  }
 }
 
 async function getCryptoPrice({ coin, currency = "usd" }) {
@@ -424,12 +457,17 @@ export async function executeTool(toolCall, context = {}) {
 
   const handler = TOOL_HANDLERS[name]
   if (!handler) {
+    console.error(`[TOOL ERROR] Unknown tool: ${name}`);
     return { error: `Unknown tool: ${name}` }
   }
 
   try {
-    return await handler(params, context)
+    console.log(`[TOOL EXECUTION] Running: ${name}`);
+    const result = await handler(params, context);
+    console.log(`[TOOL SUCCESS] ${name} completed`);
+    return result;
   } catch (error) {
+    console.error(`[TOOL EXECUTION ERROR] ${name}: ${error.message}`);
     return {
       error: `Tool execution failed for ${name}`,
       details: error.message

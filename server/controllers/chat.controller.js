@@ -1,4 +1,4 @@
-import { runAgent, runAgentStream } from "../agent.js";
+import { runAgent } from "../agent.js";
 import { Conversation } from "../models/conversation.model.js";
 import mongoose from "mongoose";
 
@@ -151,29 +151,6 @@ function fallbackReplyForMissingProvider() {
   return "### Answer\n- AI provider is not configured on the server yet.\n- Please set `GROQ_API_KEY` to enable live assistant responses.";
 }
 
-function wantsStreamingResponse(req) {
-  if (req.query?.stream === "1") return true;
-  const accept = req.headers?.accept ?? "";
-  return typeof accept === "string" && accept.includes("text/event-stream");
-}
-
-function initializeSse(res) {
-  res.status(200);
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  if (typeof res.flushHeaders === "function") {
-    res.flushHeaders();
-  }
-}
-
-function writeSseEvent(res, payload) {
-  if (res.writableEnded || res.destroyed) return false;
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  return true;
-}
-
 export async function chat(req, res) {
   try {
     const userId = req.user?.id;
@@ -202,73 +179,13 @@ export async function chat(req, res) {
       createdAt: messageTime,
     };
     const agentMessages = [latestUserMessage];
-
-    if (wantsStreamingResponse(req)) {
-      initializeSse(res);
-      let clientClosed = false;
-      req.on("close", () => {
-        clientClosed = true;
-      });
-
-      let streamedReply = "";
-      try {
-        streamedReply = await runAgentStream(agentMessages, {
-          userId,
-          userEmail: req.user?.email,
-        }, {
-          onToken: async (token) => {
-            if (!token || clientClosed) return;
-            writeSseEvent(res, { type: "token", token });
-          },
-          onReset: async () => {
-            if (clientClosed) return;
-            writeSseEvent(res, { type: "reset" });
-          },
-        });
-      } catch (error) {
-        if (clientClosed) return res.end();
-        if (error.message === "GROQ_API_KEY is not configured") {
-          streamedReply = fallbackReplyForMissingProvider();
-          writeSseEvent(res, { type: "token", token: streamedReply });
-        } else {
-          writeSseEvent(res, {
-            type: "error",
-            error: "Failed to process chat request",
-            details: error.message,
-          });
-          return res.end();
-        }
-      }
-
-      const assistantMessage = {
-        role: "assistant",
-        content: streamedReply,
-        createdAt: new Date(),
-      };
-      const conversation = await saveConversation(
-        userId,
-        normalized.conversationId,
-        latestUserMessage,
-        assistantMessage,
-      );
-
-      if (!clientClosed) {
-        writeSseEvent(res, {
-          type: "done",
-          reply: streamedReply,
-          conversationId: conversation.id,
-          conversation,
-        });
-      }
-      return res.end();
-    }
-
     let reply;
+
     try {
       reply = await runAgent(agentMessages, {
         userId: userId,
-        userEmail: req.user?.email
-      })
+        userEmail: req.user?.email,
+      });
     } catch (error) {
       if (error.message === "GROQ_API_KEY is not configured") {
         reply = fallbackReplyForMissingProvider();

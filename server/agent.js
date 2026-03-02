@@ -10,6 +10,123 @@ const KNOWN_TOOL_NAMES = new Set(AVAILABLE_TOOLS.map((tool) => tool.function.nam
 const DEFAULT_MODEL = "llama-3.3-70b-versatile";
 let groqClient;
 
+function getLatestUserMessage(messages = []) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const msg = messages[index];
+    if (msg?.role === "user" && typeof msg.content === "string" && msg.content.trim()) {
+      return msg.content.trim();
+    }
+  }
+  return "";
+}
+
+function inferRequiredToolsFromPrompt(prompt = "") {
+  const text = String(prompt).toLowerCase();
+  const required = new Set();
+
+  const wantsWeather = /\b(weather|temperature|forecast|humidity|rain)\b/.test(text);
+  if (wantsWeather) {
+    required.add("get_weather");
+  }
+
+  const wantsSendEmail =
+    /\b(send|draft|write|compose)\b[\s\S]{0,40}\b(email|mail)\b/.test(text)
+    || /\b(email|mail)\s+to\b/.test(text);
+  if (wantsSendEmail) {
+    required.add("send_email");
+  }
+
+  const wantsReadEmail =
+    /\b(gmail|inbox)\b/.test(text)
+    || (/\b(email|emails|mail)\b/.test(text) && /\b(read|check|find|search|show|list)\b/.test(text))
+    || /\bgmail\s+to\b/.test(text);
+  if (wantsReadEmail) {
+    required.add("read_gmail");
+  }
+
+  const wantsNews = /\b(news|article|latest|breaking)\b/.test(text);
+  if (wantsNews) {
+    required.add("search_web");
+  }
+
+  return [...required].filter((toolName) => KNOWN_TOOL_NAMES.has(toolName));
+}
+
+function getAllowedToolsFromPrompt(prompt = "") {
+  // ONE TOOL PER PURPOSE - strict exclusive logic
+  const text = String(prompt).toLowerCase();
+  const allowed = new Set();
+
+  // Priority order: check specific intents and add ONLY the tool needed for each
+
+  // WEATHER - exclusive
+  if (/\b(weather|temperature|forecast|humidity|rain|wind|sunny|cloudy)\b/.test(text)) {
+    return new Set(["get_weather"]);
+  }
+
+  // NEWS - exclusive (takes priority over general search)
+  if (/\b(news|article|latest|breaking|headlines)\b/.test(text)) {
+    return new Set(["get_news"]);
+  }
+
+  // READ EMAIL - exclusive
+  if (/\b(read|check|view|show|list|fetch|see|what.*in)\b[\s\S]{0,50}\b(email|mail|inbox|gmail)\b|\b(email|mail|inbox|gmail)[\s\S]{0,50}\b(read|check|view|show|list|fetch)\b/i.test(text)) {
+    return new Set(["read_gmail"]);
+  }
+
+  // SEND EMAIL - exclusive
+  if (/\b(send|draft|write|compose|email)\b[\s\S]{0,60}\b(to|recipient)\b|\b(send|mail|write)\b[\s\S]{0,40}@/i.test(text)) {
+    return new Set(["send_email"]);
+  }
+
+  // GENERAL SEARCH - only if no other purpose matched
+  if (/\b(search|find|look|information|info|how|what|where|when|who)\b/.test(text)) {
+    return new Set(["search_web"]);
+  }
+
+  // CRYPTO - exclusive
+  if (/\b(crypto|bitcoin|ethereum|price|btc|eth)\b/.test(text)) {
+    return new Set(["get_crypto_price"]);
+  }
+
+  // TASKS - exclusive
+  if (/\b(task|todo|remember|save|create|add|note|reminder|list.*task)\b/.test(text)) {
+    return new Set(["save_task", "get_tasks", "delete_task"]);
+  }
+
+  // WEB SCRAPING - exclusive
+  if (/\b(scrape|website|web.*page|browse|visit|extract|content)\b/.test(text)) {
+    return new Set(["scrape_website"]);
+  }
+
+  // SCREENSHOT - exclusive
+  if (/\b(screenshot|screen.*capture|take.*snap|capture.*screen)\b/.test(text)) {
+    return new Set(["take_screenshot"]);
+  }
+
+  // FORM FILLING - exclusive
+  if (/\b(form|submit|fill.*form|enter.*data|input.*field)\b/.test(text)) {
+    return new Set(["fill_form"]);
+  }
+
+  // Default: no tools allowed
+  return allowed;
+}
+
+function isToolAllowed(toolName, allowedTools) {
+  return allowedTools.has(toolName);
+}
+
+const getMissingRequiredTools = (requiredTools, executedTools) => {
+  if (!Array.isArray(requiredTools) || requiredTools.length === 0) return [];
+  return requiredTools.filter((toolName) => !executedTools.has(toolName));
+};
+
+function isUnauthorizedToolCall(toolName, allowedTools) {
+  // Check if the tool being called wasn't in the original request
+  return !isToolAllowed(toolName, allowedTools);
+}
+
 function containsToolPayloadHeuristic(content = "") {
   if (typeof content !== "string" || !content.trim()) return false;
   return (
@@ -22,6 +139,26 @@ function containsToolPayloadHeuristic(content = "") {
 function claimsEmailSent(content = "") {
   if (typeof content !== "string" || !content.trim()) return false;
   return /(email|mail)[\s\S]{0,120}(sent|delivered)|\bhas been sent\b/i.test(content);
+}
+
+function claimsHasReadEmails(content = "") {
+  if (typeof content !== "string" || !content.trim()) return false;
+  return (
+    /\b(inbox|emails?|gmail)\b[\s\S]{0,200}\b(from|subject|received|unread)\b/i.test(content)
+    || /\b(here are|here is|found|showing).*\b(emails?|inbox|messages)\b/i.test(content)
+    || /\(subject:|received at:|from:|unread:\)/i.test(content)
+    || /\[.*?subject.*?\]/i.test(content)
+  );
+}
+
+function claimsWeatherInfo(content = "") {
+  if (typeof content !== "string" || !content.trim()) return false;
+  return (
+    /\b(temperature|weather|humidity|forecast|wind speed|pressure|celsius|fahrenheit|°[cf])\b[\s\S]{0,200}\b(bhopal|delhi|mumbai|bangalore|weather in|today's?|currently|right now)\b/i.test(content)
+    || /\bthe weather[\s\S]{0,100}\b(is|shows|indicates)\b/i.test(content)
+    || /\binformation about.*weather/i.test(content)
+    || /\b(currently|right now)[\s\S]{0,80}(temperature|°c|°f|degrees)/i.test(content)
+  );
 }
 
 function getGroqClient() {
@@ -66,6 +203,10 @@ export async function runAgent(incomingMessages = [], context = {}) {
   const groq = getGroqClient();
   const messages = ensureSystemMessage(incomingMessages);
   let sendEmailSucceeded = false;
+  const executedTools = new Set();
+  const userPrompt = getLatestUserMessage(messages);
+  const requiredTools = inferRequiredToolsFromPrompt(userPrompt);
+  const allowedTools = getAllowedToolsFromPrompt(userPrompt);
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
     const response = await groq.chat.completions.create({
@@ -113,8 +254,32 @@ export async function runAgent(incomingMessages = [], context = {}) {
         continue;
       }
 
+      const missingRequiredTools = getMissingRequiredTools(requiredTools, executedTools);
+      if (missingRequiredTools.length > 0) {
+        messages.push({ role: "assistant", content });
+        messages.push({
+          role: "user",
+          content: `Observation: The user's request requires these tool calls before finalizing: ${missingRequiredTools.join(", ")}. Call the next missing tool now using strict tool JSON only.`,
+        });
+        continue;
+      }
+
       return formatFinalResponse(content);
     }
+
+    // Check if the tool being called is authorized by the user's request
+    if (isUnauthorizedToolCall(toolCall.tool, allowedTools)) {
+      console.log(`\n[UNAUTHORIZED TOOL CALL] Step ${step + 1}: ${toolCall.tool} (not requested)`);
+      messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
+      messages.push({
+        role: "user",
+        content: `Observation: You tried to call tool "${toolCall.tool}" which was not part of the user's request. Stick to the original task: ${userPrompt}. Only use these tools if needed: ${[...allowedTools].join(", ")}.`,
+      });
+      continue;
+    }
+
+    console.log(`\n[TOOL CALL] Step ${step + 1}: ${toolCall.tool}`);
+    console.log(`  Arguments: ${JSON.stringify(toolCall.arguments, null, 2)}`);
 
     const toolResult = await executeTool({
       function: {
@@ -123,12 +288,25 @@ export async function runAgent(incomingMessages = [], context = {}) {
       },
     }, context);
 
+    console.log(`  Result: ${JSON.stringify(toolResult, null, 2)}\n`);
+
     if (toolCall.tool === "send_email") {
       sendEmailSucceeded = Boolean(toolResult?.success);
     }
+    executedTools.add(toolCall.tool);
 
     messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
     messages.push({ role: "user", content: `Observation: ${JSON.stringify(toolResult)}` });
+
+    // Check if all required tools have been executed - if so, ask for final response
+    const missingAfterExecution = getMissingRequiredTools(requiredTools, executedTools);
+    if (missingAfterExecution.length === 0 && requiredTools.size > 0) {
+      console.log(`\n[MISSION COMPLETE] All required tools executed. Requesting final response...`);
+      messages.push({
+        role: "user",
+        content: "All requested information has been gathered. Provide a final response based on the results above. Do not call any more tools.",
+      });
+    }
   }
 
   return formatFinalResponse("I could not complete this request within the step limit.");
@@ -139,6 +317,10 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
   const groq = getGroqClient();
   const messages = ensureSystemMessage(incomingMessages);
   let sendEmailSucceeded = false;
+  const executedTools = new Set();
+  const userPrompt = getLatestUserMessage(messages);
+  const requiredTools = inferRequiredToolsFromPrompt(userPrompt);
+  const allowedTools = getAllowedToolsFromPrompt(userPrompt);
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
     const stream = await groq.chat.completions.create({
@@ -173,6 +355,20 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
     const toolCall = parseToolCall(finalContent);
 
     if (toolCall) {
+      // Check if the tool being called is authorized by the user's request
+      if (isUnauthorizedToolCall(toolCall.tool, allowedTools)) {
+        console.log(`\n[UNAUTHORIZED TOOL CALL] Step ${step + 1}: ${toolCall.tool} (not requested)`);
+        messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
+        messages.push({
+          role: "user",
+          content: `Observation: You tried to call tool "${toolCall.tool}" which was not part of the user's request. Stick to the original task: ${userPrompt}. Only use these tools if needed: ${[...allowedTools].join(", ")}.`,
+        });
+        continue;
+      }
+
+      console.log(`\n[TOOL CALL] Step ${step + 1}: ${toolCall.tool}`);
+      console.log(`  Arguments: ${JSON.stringify(toolCall.arguments, null, 2)}`);
+
       const result = await executeTool({
         function: {
           name: toolCall.tool,
@@ -180,9 +376,12 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
         },
       }, context);
 
+      console.log(`  Result: ${JSON.stringify(result, null, 2)}\n`);
+
       if (toolCall.tool === "send_email") {
         sendEmailSucceeded = Boolean(result?.success);
       }
+      executedTools.add(toolCall.tool);
 
       messages.push({ role: "assistant", content: JSON.stringify(toolCall) });
       messages.push({ role: "user", content: `Observation: ${JSON.stringify(result)}` });
@@ -228,6 +427,16 @@ export async function runAgentStream(incomingMessages = [], context = {}, handle
         role: "user",
         content:
           "Observation: You claimed an email was sent, but send_email has not succeeded yet. If email is required, call send_email first and only then confirm delivery.",
+      });
+      continue;
+    }
+
+    const missingRequiredTools = getMissingRequiredTools(requiredTools, executedTools);
+    if (missingRequiredTools.length > 0) {
+      messages.push({ role: "assistant", content: finalContent });
+      messages.push({
+        role: "user",
+        content: `Observation: The user's request requires these tool calls before finalizing: ${missingRequiredTools.join(", ")}. Call the next missing tool now using strict tool JSON only.`,
       });
       continue;
     }
