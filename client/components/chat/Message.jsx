@@ -264,8 +264,8 @@ const Message = memo(function Message({
             
             {/* AI avatar — aligned to top of bubble */}
             {!isUser && (
-                <div className={`w-7 sm:w-8 h-7 sm:h-8 rounded-full bg-gradient-to-br ${messageClass.aiAvatar}
-                    flex-shrink-0 flex items-center justify-center text-white text-xs sm:text-sm font-semibold mt-5`}>
+                <div className={`hidden sm:flex w-7 sm:w-8 h-7 sm:h-8 rounded-full bg-gradient-to-br ${messageClass.aiAvatar}
+                    flex-shrink-0 items-center justify-center text-white text-xs sm:text-sm font-semibold mt-5`}>
                     Ai
                 </div>
             )}
@@ -357,8 +357,8 @@ const Message = memo(function Message({
 
             {/* User avatar */}
             {isUser && (
-                <div className={`w-7 sm:w-8 h-7 sm:h-8 rounded-full bg-gradient-to-br ${messageClass.userAvatar}
-                    flex-shrink-0 flex items-center justify-center text-white text-xs sm:text-sm font-semibold`}>
+                <div className={`hidden sm:flex w-7 sm:w-8 h-7 sm:h-8 rounded-full bg-gradient-to-br ${messageClass.userAvatar}
+                    flex-shrink-0 items-center justify-center text-white text-xs sm:text-sm font-semibold`}>
                     {user}
                 </div>
             )}
