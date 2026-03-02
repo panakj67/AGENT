@@ -22,48 +22,37 @@ function parseArguments(rawArgs) {
   }
 }
 
+// REPLACE normalizeEmailBody in server/tools/executor.js with this:
+
 function normalizeEmailBody(rawBody) {
-  const text = String(rawBody ?? "").replace(/\r\n/g, "\n");
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+  if (!rawBody) return "";
 
-  const cleanedLines = [];
-  const seen = new Set();
-  let previousLine = "";
+  // Model writes \n as literal \\n inside JSON — decode them first
+  const decoded = String(rawBody).replace(/\\n/g, "\n").replace(/\\t/g, "\t");
 
+  // Normalize line endings
+  const text = decoded.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  // Trim trailing whitespace per line, preserve blank lines (paragraph breaks)
+  const lines = text.split("\n").map((l) => l.trimEnd());
+
+  // Collapse 3+ blank lines into 2
+  const out = [];
+  let blanks = 0;
   for (const line of lines) {
-    let normalizedLine = line;
-
-    // Convert markdown table rows into readable plain text rows.
-    if (/^\|.*\|$/.test(normalizedLine)) {
-      const cells = normalizedLine
-        .split("|")
-        .map((cell) => cell.trim())
-        .filter(Boolean);
-      const isSeparator = cells.length > 0 && cells.every((cell) => /^-+$/.test(cell));
-      if (isSeparator) continue;
-      normalizedLine = cells.join(" | ");
+    if (line === "") {
+      if (++blanks <= 2) out.push("");
+    } else {
+      blanks = 0;
+      out.push(line);
     }
-
-    // Remove duplicated intro phrase if repeated across lines.
-    normalizedLine = normalizedLine.replace(
-      /^(Here is a short executive summary[^:]*:\s*)+/i,
-      "Here is a short executive summary:\n",
-    );
-
-    const dedupeKey = normalizedLine.toLowerCase();
-    if (dedupeKey === previousLine || seen.has(dedupeKey)) {
-      continue;
-    }
-
-    seen.add(dedupeKey);
-    previousLine = dedupeKey;
-    cleanedLines.push(normalizedLine);
   }
 
-  return cleanedLines.join("\n");
+  // Strip leading/trailing blank lines
+  while (out.length && out[0] === "") out.shift();
+  while (out.length && out[out.length - 1] === "") out.pop();
+
+  return out.join("\n");
 }
 
 async function searchWeb({ query }) {
@@ -77,22 +66,24 @@ async function searchWeb({ query }) {
   return results.map((item) => `${item.title}: ${item.content}`).join("\n");
 }
 
+// In server/tools/executor.js
+// REPLACE the sendEmail function's validation block (lines ~55-70) with this:
+
 async function sendEmail({ to, subject, body }) {
   const normalizedBody = normalizeEmailBody(body).trim();
-  const hasTemplatePlaceholder = /\{\{[\s\S]*\}\}/.test(normalizedBody);
-  const placeholderLikeBody =
-    !normalizedBody
-    || hasTemplatePlaceholder
-    || normalizedBody.length < 80
-    || (
-      normalizedBody.includes("...")
-      && !normalizedBody.includes("\n")
-      && normalizedBody.length < 240
-    );
 
-  if (placeholderLikeBody) {
+  // Only block truly empty or unfilled template placeholders like {{name}} or [YOUR MESSAGE]
+  const hasTemplatePlaceholder = /\{\{[\s\S]*?\}\}|\[YOUR[^\]]*\]/i.test(normalizedBody);
+  const isEffectivelyEmpty = !normalizedBody || normalizedBody.length < 5;
+  // Block bodies that are ONLY ellipses with zero real words
+  const isEllipsisOnly =
+    normalizedBody.includes("...") &&
+    !normalizedBody.includes("\n") &&
+    normalizedBody.replace(/\./g, "").trim().length < 10;
+
+  if (isEffectivelyEmpty || hasTemplatePlaceholder || isEllipsisOnly) {
     throw new Error(
-      "Email body appears incomplete or placeholder-like. Provide a full, detailed body before sending.",
+      "Email body is empty or contains unfilled placeholders. Provide the actual message content.",
     );
   }
 

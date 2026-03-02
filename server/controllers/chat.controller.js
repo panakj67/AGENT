@@ -1,4 +1,4 @@
-import { runAgent } from "../agent.js";
+import { runAgent, runAgentStream } from "../agent.js";
 import { Conversation } from "../models/conversation.model.js";
 import mongoose from "mongoose";
 
@@ -9,22 +9,14 @@ const MAX_LIST_LIMIT = 100;
 function normalizeMessages(body) {
   const payload = body ?? {};
 
-  if (Array.isArray(payload.messages)) {
-    return payload;
-  }
+  if (Array.isArray(payload.messages)) return payload;
 
   if (typeof payload.prompt === "string" && payload.prompt.trim()) {
-    return {
-      conversationId: payload.conversationId,
-      messages: [{ role: "user", content: payload.prompt.trim() }],
-    };
+    return { conversationId: payload.conversationId, messages: [{ role: "user", content: payload.prompt.trim() }] };
   }
 
   if (typeof payload.message === "string" && payload.message.trim()) {
-    return {
-      conversationId: payload.conversationId,
-      messages: [{ role: "user", content: payload.message.trim() }],
-    };
+    return { conversationId: payload.conversationId, messages: [{ role: "user", content: payload.message.trim() }] };
   }
 
   return null;
@@ -78,9 +70,7 @@ function isValidObjectId(id) {
 function getInMemoryConversation(userId, id) {
   if (!id) return null;
   const conversation = inMemoryConversations.get(id) ?? null;
-  if (!conversation || conversation.userId !== userId) {
-    return null;
-  }
+  if (!conversation || conversation.userId !== userId) return null;
   return conversation;
 }
 
@@ -92,14 +82,8 @@ async function saveConversation(userId, conversationId, userMessage, assistantMe
     if (conversationId && isValidObjectId(conversationId)) {
       const updated = await Conversation.findOneAndUpdate(
         { _id: conversationId, userId },
-        {
-          $push: { messages: { $each: messagesToAppend } },
-          $set: { updatedAt: now },
-        },
-        {
-          returnDocument: "after",
-          lean: true,
-        },
+        { $push: { messages: { $each: messagesToAppend } }, $set: { updatedAt: now } },
+        { returnDocument: "after", lean: true }
       );
 
       if (updated) {
@@ -108,7 +92,7 @@ async function saveConversation(userId, conversationId, userMessage, assistantMe
           if (nextTitle !== "New conversation") {
             await Conversation.updateOne(
               { _id: updated._id, userId, title: "New conversation" },
-              { $set: { title: nextTitle } },
+              { $set: { title: nextTitle } }
             );
             updated.title = nextTitle;
           }
@@ -148,18 +132,107 @@ async function saveConversation(userId, conversationId, userMessage, assistantMe
 }
 
 function fallbackReplyForMissingProvider() {
-  return "### Answer\n- AI provider is not configured on the server yet.\n- Please set `GROQ_API_KEY` to enable live assistant responses.";
+  return "AI provider is not configured on the server yet. Please set `GROQ_API_KEY` to enable live assistant responses.";
 }
+
+// ─── SSE helper ───────────────────────────────────────────────────────────────
+
+function sendSseEvent(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+// ─── Streaming chat handler ────────────────────────────────────────────────────
+
+export async function chatStream(req, res) {
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const normalized = normalizeMessages(req.body);
+  if (!normalized) {
+    return res.status(400).json({ error: "Request body must include 'messages' or 'message'" });
+  }
+
+  const incomingMessages = normalized.messages;
+  const userMessage = incomingMessages[incomingMessages.length - 1];
+  if (!userMessage || userMessage.role !== "user") {
+    return res.status(400).json({ error: "Last message must be a user message" });
+  }
+
+  // Set SSE headers
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering if behind proxy
+  res.flushHeaders();
+
+  const messageTime = new Date();
+  const latestUserMessage = {
+    role: "user",
+    content: String(userMessage.content),
+    createdAt: messageTime,
+  };
+
+  let reply = "";
+
+  try {
+    reply = await runAgentStream(
+      [latestUserMessage],
+      { userId, userEmail: req.user?.email },
+      {
+        onToken: async (token) => {
+          sendSseEvent(res, { type: "token", token });
+        },
+      }
+    );
+  } catch (error) {
+    if (error.message === "GROQ_API_KEY is not configured") {
+      reply = fallbackReplyForMissingProvider();
+      sendSseEvent(res, { type: "token", token: reply });
+    } else {
+      console.error("[chatStream] Agent error:", error.message);
+      sendSseEvent(res, { type: "error", error: "Agent failed", details: error.message });
+      res.end();
+      return;
+    }
+  }
+
+  // Save conversation
+  let conversation = null;
+  try {
+    const assistantMessage = {
+      role: "assistant",
+      content: reply,
+      createdAt: new Date(),
+    };
+    conversation = await saveConversation(
+      userId,
+      normalized.conversationId,
+      latestUserMessage,
+      assistantMessage
+    );
+  } catch (error) {
+    console.error("[chatStream] Save error:", error.message);
+  }
+
+  // Send done event — this is what the frontend waits for
+  sendSseEvent(res, {
+    type: "done",
+    reply,
+    conversationId: conversation?.id ?? null,
+    conversation: conversation ?? null,
+  });
+
+  res.end();
+}
+
+// ─── Non-streaming chat handler ────────────────────────────────────────────────
 
 export async function chat(req, res) {
   try {
     const userId = req.user?.id;
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
     const normalized = normalizeMessages(req.body);
-
     if (!normalized) {
       return res.status(400).json({
         error: "Request body must include either 'messages' (array) or 'prompt' (string)",
@@ -178,12 +251,11 @@ export async function chat(req, res) {
       content: String(userMessage.content),
       createdAt: messageTime,
     };
-    const agentMessages = [latestUserMessage];
-    let reply;
 
+    let reply;
     try {
-      reply = await runAgent(agentMessages, {
-        userId: userId,
+      reply = await runAgent([latestUserMessage], {
+        userId,
         userEmail: req.user?.email,
       });
     } catch (error) {
@@ -199,13 +271,14 @@ export async function chat(req, res) {
       content: reply,
       createdAt: new Date(),
     };
-    const conversation = await saveConversation(userId, normalized.conversationId, latestUserMessage, assistantMessage);
+    const conversation = await saveConversation(
+      userId,
+      normalized.conversationId,
+      latestUserMessage,
+      assistantMessage
+    );
 
-    return res.json({
-      reply,
-      conversationId: conversation.id,
-      conversation,
-    });
+    return res.json({ reply, conversationId: conversation.id, conversation });
   } catch (error) {
     return res.status(500).json({
       error: "Failed to process chat request",
@@ -214,12 +287,12 @@ export async function chat(req, res) {
   }
 }
 
+// ─── Conversation CRUD ─────────────────────────────────────────────────────────
+
 export async function listConversations(req, res) {
   try {
     const userId = req.user?.id;
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
     const limit = parseListLimit(req.query?.limit);
     const before = parseBeforeDate(req.query?.before);
@@ -235,14 +308,12 @@ export async function listConversations(req, res) {
     }
 
     let conversations = [...inMemoryConversations.values()]
-      .filter((conversation) => conversation.userId === userId)
+      .filter((c) => c.userId === userId)
       .sort((a, b) => b.updatedAt - a.updatedAt);
     if (before) {
-      conversations = conversations.filter((conversation) => new Date(conversation.updatedAt) < before);
+      conversations = conversations.filter((c) => new Date(c.updatedAt) < before);
     }
-    conversations = conversations.slice(0, limit);
-
-    return res.json(conversations.map(toPublicConversationSummary));
+    return res.json(conversations.slice(0, limit).map(toPublicConversationSummary));
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch conversations", details: error.message });
   }
@@ -251,28 +322,19 @@ export async function listConversations(req, res) {
 export async function getConversation(req, res) {
   try {
     const userId = req.user?.id;
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
     const { id } = req.params;
 
     if (isMongoReady()) {
-      if (!isValidObjectId(id)) {
-        return res.status(404).json({ error: "Conversation not found" });
-      }
+      if (!isValidObjectId(id)) return res.status(404).json({ error: "Conversation not found" });
       const conversation = await Conversation.findOne({ _id: id, userId }).lean();
-      if (!conversation) {
-        return res.status(404).json({ error: "Conversation not found" });
-      }
+      if (!conversation) return res.status(404).json({ error: "Conversation not found" });
       return res.json(toPublicConversation(conversation));
     }
 
     const conversation = getInMemoryConversation(userId, id);
-    if (!conversation) {
-      return res.status(404).json({ error: "Conversation not found" });
-    }
-
+    if (!conversation) return res.status(404).json({ error: "Conversation not found" });
     return res.json(conversation);
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch conversation", details: error.message });
@@ -282,28 +344,19 @@ export async function getConversation(req, res) {
 export async function deleteConversation(req, res) {
   try {
     const userId = req.user?.id;
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
     const { id } = req.params;
 
     if (isMongoReady()) {
-      if (!isValidObjectId(id)) {
-        return res.status(404).json({ error: "Conversation not found" });
-      }
+      if (!isValidObjectId(id)) return res.status(404).json({ error: "Conversation not found" });
       const deleted = await Conversation.deleteOne({ _id: id, userId });
-      if (!deleted?.deletedCount) {
-        return res.status(404).json({ error: "Conversation not found" });
-      }
+      if (!deleted?.deletedCount) return res.status(404).json({ error: "Conversation not found" });
       return res.json({ success: true, id });
     }
 
     const conversation = getInMemoryConversation(userId, id);
-    if (!conversation) {
-      return res.status(404).json({ error: "Conversation not found" });
-    }
-
+    if (!conversation) return res.status(404).json({ error: "Conversation not found" });
     inMemoryConversations.delete(id);
     return res.json({ success: true, id });
   } catch (error) {
