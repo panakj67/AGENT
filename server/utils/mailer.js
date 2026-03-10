@@ -1,6 +1,6 @@
 import nodemailer from "nodemailer";
 
-function createTransport() {
+export function createTransport() {
   const host = process.env.SMTP_HOST;
   const port = Number(process.env.SMTP_PORT || 587);
   const user = process.env.SMTP_USER || process.env.EMAIL_USER;
@@ -47,4 +47,21 @@ export async function sendOtpEmail({ to, otp }) {
   });
 
   return { delivered: true };
+}
+
+export async function verifyMailTransport({ tag = "mail" } = {}) {
+  const { transporter, missing } = createTransport();
+  if (!transporter) {
+    console.warn(`[${tag}] SMTP not configured. Missing: ${missing.join(", ") || "SMTP_HOST/SMTP_USER/SMTP_PASS"}.`);
+    return false;
+  }
+
+  try {
+    await transporter.verify();
+    console.log(`[${tag}] SMTP transport verified.`);
+    return true;
+  } catch (error) {
+    console.error(`[${tag}] SMTP verification failed: ${error.message}`);
+    return false;
+  }
 }

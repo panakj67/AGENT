@@ -246,6 +246,28 @@ export const AVAILABLE_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_crypto_markets",
+      description: "Get current prices and 24h change for multiple cryptocurrencies",
+      parameters: {
+        type: "object",
+        properties: {
+          coins: {
+            type: "array",
+            description: "List of coin ids e.g. ['bitcoin','ethereum']",
+            items: { type: "string" },
+          },
+          currency: {
+            type: "string",
+            description: "Currency code e.g. usd, inr. Default usd",
+          },
+        },
+        required: ["coins"],
+      },
+    },
+  },
 
   {
     type: "function",

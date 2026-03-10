@@ -9,6 +9,7 @@ import authRoutes from "./routes/auth.routes.js";
 
 import rateLimit from "express-rate-limit"
 import { startReminderJob } from "./Jobs/reminder.job.js"
+import { verifyMailTransport } from "./utils/mailer.js";
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -50,7 +51,8 @@ connectDatabase()
   .catch((error) => {
     console.error("[db] Connection failed:", error.message);
   })
-  .finally(() => {
+  .finally(async () => {
+    await verifyMailTransport({ tag: "startup" });
     startReminderJob()   // ← add this
     app.listen(PORT, () => {
       console.log(`Aura server listening on port ${PORT}`);

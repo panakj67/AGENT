@@ -31,12 +31,12 @@ export async function scrapeWebsite({ url, extract_text = true }) {
       const text = await page.evaluate(() => document.body.innerText)
       return { 
         url, 
-        content: text.replace(/\s+/g, " ").trim().slice(0, 3000) 
+        content: text.trim()
       }
     }
 
     const html = await page.content()
-    return { url, content: html.slice(0, 3000) }
+    return { url, content: html }
 
   } finally {
     await browser.close()
@@ -62,7 +62,7 @@ export async function clickAndScrape({ url, selector, extract_text = true }) {
       const text = await page.evaluate(() => document.body.innerText)
       return { 
         url: page.url(), 
-        content: text.replace(/\s+/g, " ").trim().slice(0, 3000) 
+        content: text.trim()
       }
     }
 

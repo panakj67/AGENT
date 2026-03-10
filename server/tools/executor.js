@@ -1,6 +1,6 @@
 import axios from "axios";
-import nodemailer from "nodemailer";
 import "dotenv/config";
+import { createTransport } from "../utils/mailer.js";
 
 import { 
   scrapeWebsite, 
@@ -56,38 +56,82 @@ function normalizeEmailBody(rawBody) {
   return out.join("\n");
 }
 
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function blockToHtml(lines) {
+  if (lines.length === 0) return "";
+  const trimmed = lines.map((l) => l.trim());
+  const isList = trimmed.every((l) => l.startsWith("- "));
+  const isTable =
+    trimmed.some((l) => /\|/.test(l)) &&
+    trimmed.some((l) => /^\|?\s*:?-{3,}/.test(l));
+
+  if (isTable) {
+    return `<pre>${escapeHtml(lines.join("\n"))}</pre>`;
+  }
+
+  if (isList) {
+    const items = trimmed.map((l) => `<li>${escapeHtml(l.slice(2))}</li>`).join("");
+    return `<ul>${items}</ul>`;
+  }
+
+  const html = escapeHtml(lines.join("\n")).replace(/\n/g, "<br />");
+  return `<p>${html}</p>`;
+}
+
+function toEmailHtml(normalizedBody) {
+  const lines = normalizedBody.split("\n");
+  const blocks = [];
+  let current = [];
+
+  for (const line of lines) {
+    if (line.trim() === "") {
+      if (current.length) {
+        blocks.push(current);
+        current = [];
+      }
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length) blocks.push(current);
+
+  const body = blocks.map(blockToHtml).filter(Boolean).join("");
+  return `<div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.5;">${body}</div>`;
+}
+
 async function searchWeb({ query }) {
   const response = await axios.post("https://api.tavily.com/search", {
     api_key: process.env.TAVILY_API_KEY,
     query,
-    max_results: 3,
+    max_results: 5,
     include_answer: true,
   });
 
   const results = Array.isArray(response.data?.results) ? response.data.results : [];
   
-  // Extract and clean results, removing nav/menu clutter
+  // Return full search results without truncation
   return results
     .map((item) => {
-      // Get clean content: remove navigation, menus, language links, etc.
+      // Keep content as-is, minimal cleaning
       let content = item.content || "";
       
-      // Remove common navigation patterns
-      content = content
-        .replace(/\[.*?\]\(.*?\)/g, "") // Remove markdown links
-        .replace(/\|.*?\|/g, "|...") // Truncate table formatting
-        .replace(/\[[^\]]+\]/g, "") // Remove bracket navigation
-        .replace(/([A-Z][a-z]+\s+){5,}/g, (match) => match.split("\s+").slice(0, 3).join(" ") + "..."); // Limit repetitive terms
+      // Only remove markdown link syntax but keep content
+      content = content.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
       
-      // Extract first meaningful paragraph (max 300 chars)
-      const paragraphs = content.split("\n\n");
-      const meaningful = paragraphs.find(p => p.trim().length > 20 && p.trim().length < 500) || paragraphs[0];
-      const truncated = meaningful?.substring(0, 300).trim() || "";
-      
-      return `${item.title}: ${truncated}`;
+      return `Title: ${item.title}
+URL: ${item.url}
+Content:\n${content}`;
     })
-    .filter((item) => item.length > 10) // Remove empty results
-    .join("\n\n");
+    .filter((item) => item.length > 10)
+    .join("\n\n---\n\n");
 }
 
 // In server/tools/executor.js
@@ -96,8 +140,16 @@ async function searchWeb({ query }) {
 async function sendEmail({ to, subject, body }) {
   const normalizedBody = normalizeEmailBody(body).trim();
 
-  // Only block truly empty or unfilled template placeholders like {{name}} or [YOUR MESSAGE]
-  const hasTemplatePlaceholder = /\{\{[\s\S]*?\}\}|\[YOUR[^\]]*\]/i.test(normalizedBody);
+  // Block truly empty or unfilled template placeholders like {{name}}, {variable}, or [YOUR MESSAGE]
+  const hasTemplatePlaceholder =
+    /\{\{[\s\S]*?\}\}/.test(normalizedBody) ||  // {{...}}
+    /\{[a-z][a-z0-9_\s]+\}/i.test(normalizedBody) ||  // {variable} or {bitcoin price} style
+    /\[YOUR[^\]]*\]/i.test(normalizedBody) ||  // [YOUR...]
+    /\b(news|price|details|summary)\s+will\s+be\s+added\s+here\b/i.test(normalizedBody) ||
+    /\bwill\s+be\s+added\s+here\b/i.test(normalizedBody) ||
+    /\bplaceholder\b/i.test(normalizedBody) ||
+    /\[insert/i.test(normalizedBody) ||
+    /<insert/i.test(normalizedBody);
   const isEffectivelyEmpty = !normalizedBody || normalizedBody.length < 5;
   // Block bodies that are ONLY ellipses with zero real words
   const isEllipsisOnly =
@@ -111,22 +163,35 @@ async function sendEmail({ to, subject, body }) {
     );
   }
 
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
-    },
-  });
+  const { transporter, missing } = createTransport();
+  if (!transporter) {
+    throw new Error(`Email transport not configured. Missing: ${missing.join(", ") || "SMTP_HOST/SMTP_USER/SMTP_PASS"}.`);
+  }
 
-  await transporter.sendMail({
-    from: process.env.EMAIL_USER,
+  await transporter.verify();
+
+  const info = await transporter.sendMail({
+    from: process.env.SMTP_FROM || process.env.SMTP_USER || process.env.EMAIL_USER,
     to,
-    subject,
+    subject: subject || "(no subject)",
     text: normalizedBody,
+    html: toEmailHtml(normalizedBody),
   });
 
-  return { success: true, message: `Email sent to ${to}` };
+  const accepted = Array.isArray(info.accepted) ? info.accepted : [];
+  const rejected = Array.isArray(info.rejected) ? info.rejected : [];
+
+  if (accepted.length === 0 || rejected.length > 0) {
+    throw new Error(`Email was not accepted by SMTP server. Accepted: ${accepted.length}, Rejected: ${rejected.length}.`);
+  }
+
+  return {
+    success: true,
+    message: `Email sent to ${to}`,
+    messageId: info.messageId,
+    accepted,
+    rejected,
+  };
 }
 
 async function getWeather({ city }) {
@@ -325,7 +390,7 @@ async function readEmailBody({ uid, folder = "INBOX" }) {
   }
 
   await client.logout()
-  return { uid, body: body.slice(0, 2000) } // limit size
+  return { uid, body: body } // return full body without truncation
 }
 
 async function getNews({ topic, count = 5 }) {
@@ -390,7 +455,53 @@ async function getCryptoPrice({ coin, currency = "usd" }) {
   )
   const price = response.data?.[coin]?.[currency]
   if (!price) return { error: `Could not find price for ${coin}` }
-  return { coin, currency, price }
+  const currencySymbol = currency.toUpperCase() === "USD" ? "$" : currency.toUpperCase();
+  return { 
+    coin, 
+    currency, 
+    price,
+    message: `The current price of ${coin} is ${currencySymbol}${price}`
+  }
+}
+
+async function getCryptoMarkets({ coins, currency = "usd" }) {
+  const ids = Array.isArray(coins) ? coins.filter(Boolean).join(",") : "";
+  if (!ids) {
+    return { error: "Coins list is required" };
+  }
+
+  const response = await axios.get(
+    "https://api.coingecko.com/api/v3/coins/markets",
+    {
+      params: {
+        vs_currency: currency,
+        ids,
+        order: "market_cap_desc",
+        per_page: Math.min(250, Math.max(1, coins.length)),
+        page: 1,
+        sparkline: false,
+        price_change_percentage: "24h",
+      },
+    }
+  );
+
+  const data = Array.isArray(response.data) ? response.data : [];
+  if (data.length === 0) {
+    return { error: "No market data returned for requested coins" };
+  }
+
+  return {
+    currency,
+    markets: data.map((item) => ({
+      id: item.id,
+      symbol: item.symbol,
+      name: item.name,
+      price: item.current_price,
+      price_change_24h: item.price_change_24h,
+      price_change_percentage_24h: item.price_change_percentage_24h,
+      last_updated: item.last_updated,
+    })),
+  };
 }
 
 async function saveTask({ title, description, due_at, recurring = "none", recurring_time = null }, userId, userEmail) {
@@ -471,6 +582,7 @@ const TOOL_HANDLERS = {
   take_screenshot: takeScreenshot,
   get_news: getNews,
   get_crypto_price: getCryptoPrice,
+  get_crypto_markets: getCryptoMarkets,
   save_task: (params, context) => saveTask(params, context?.userId, context?.userEmail),
   get_tasks: (params, context) => getTasks(params, context?.userId),
   delete_task: (params, context) => deleteTask(params, context?.userId),     

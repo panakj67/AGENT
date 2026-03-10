@@ -1,22 +1,21 @@
 import cron from "node-cron"
 import { Task } from "../models/task.model.js"
-import nodemailer from "nodemailer"
+import { createTransport } from "../utils/mailer.js"
 
 function createTransporter() {
-  return nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  })
+  const { transporter, missing } = createTransport()
+  if (!transporter) {
+    throw new Error(`Email transport not configured. Missing: ${missing.join(", ") || "SMTP_HOST/SMTP_USER/SMTP_PASS"}.`)
+  }
+  return transporter
 }
 
 async function sendReminderEmail({ to, title, description, dueAt }) {
   const transporter = createTransporter()
+  await transporter.verify()
 
   await transporter.sendMail({
-    from: process.env.EMAIL_USER,
+    from: process.env.SMTP_FROM || process.env.SMTP_USER || process.env.EMAIL_USER,
     to,
     subject: `⏰ Reminder: ${title}`,
     html: `
@@ -42,9 +41,10 @@ async function sendDailyBriefing({ to, userId }) {
   ])
 
   const transporter = createTransporter()
+  await transporter.verify()
 
   await transporter.sendMail({
-    from: process.env.EMAIL_USER,
+    from: process.env.SMTP_FROM || process.env.SMTP_USER || process.env.EMAIL_USER,
     to,
     subject: `☀️ Good Morning — Aura Daily Briefing`,
     html: `
